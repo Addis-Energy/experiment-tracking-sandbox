@@ -2143,3 +2143,64 @@ def test_grouped_row_shows_latest_across_its_members(client, db_session):
     children = {c["group_display_id"]: c["last_result_date"] for c in group["replicates"]}
     assert children == {"LR168_G_001a": "2026-10-05", "LR168_G_001b": "2026-10-09",
                         "LR168_G_001c": None}
+
+
+# --- Reactor label on the list, and the `reactor` filter (2026-11-16) --------
+
+_RXL = {"RXL_R": "R03", "RXL_P": "P03", "RXL_CF": "CF03", "RXL_AUTO": None}
+
+
+def _seed_reactor_list(db):
+    rows = [("RXL_R", "HPHT", 3, None), ("RXL_P", "HPHT", 3, "P"),
+            ("RXL_CF", "Core Flood", 3, None), ("RXL_AUTO", "Autoclave", 3, None),
+            ("RXL_OTHER", "HPHT", 7, None)]
+    for i, (eid, etype, number, series) in enumerate(rows):
+        exp = _make_experiment(db, eid, 96500 + i)
+        db.add(_EC(experiment_fk=exp.id, experiment_id=eid, experiment_type=etype,
+                   reactor_number=number, reactor_series=series))
+    db.commit()
+
+
+def _list_ids(client, query):
+    resp = client.get(f"/api/experiments?search=RXL_&{query}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    ids = {item["experiment_id"] for item in body["items"]}
+    assert body["total"] == len(ids)
+    return ids
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("P3", {"RXL_P"}), ("r03", {"RXL_R"}), ("CF3", {"RXL_CF"}),
+    ("3", {"RXL_R", "RXL_P", "RXL_CF", "RXL_AUTO"}),
+    ("%20P03%20", {"RXL_P"}),
+    ("P9", set()),
+])
+def test_list_reactor_filter(client, db_session, value, expected):
+    _seed_reactor_list(db_session)
+    assert _list_ids(client, f"reactor={value}") == expected
+
+
+def test_list_reactor_number_filter_is_unchanged(client, db_session):
+    _seed_reactor_list(db_session)
+    assert _list_ids(client, "reactor_number=3") == {
+        "RXL_R", "RXL_P", "RXL_CF", "RXL_AUTO"}
+
+
+def test_list_blank_reactor_filter_is_no_filter(client, db_session):
+    _seed_reactor_list(db_session)
+    assert len(_list_ids(client, "reactor=%20")) == 5
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "R0", "3.5", "P"])
+def test_list_unknown_reactor_is_422(client, db_session, value):
+    resp = client.get(f"/api/experiments?reactor={value}")
+    assert resp.status_code == 422
+    assert f"Unknown reactor '{value}'" in resp.json()["detail"]
+
+
+def test_list_items_carry_reactor_slot(client, db_session):
+    _seed_reactor_list(db_session)
+    resp = client.get("/api/experiments?search=RXL_&reactor_number=3")
+    slots = {i["experiment_id"]: i["reactor_slot"] for i in resp.json()["items"]}
+    assert slots == _RXL
