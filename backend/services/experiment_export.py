@@ -177,7 +177,7 @@ CORE_FLOOD_COLUMNS: list[Column] = [
 CONDITION_COLUMNS: list[Column] = [
     ("experiment_id", "Experiment ID"),
     ("experiment_type", "Experiment type"),
-    ("reactor_number", "Reactor number"),
+    ("reactor", "Reactor"),
     ("feedstock", "Feedstock"),
     ("temperature_c", "Temperature (°C)"),
     ("particle_size", "Particle size"),
@@ -430,9 +430,23 @@ def _ids(members: list[Member]) -> list[str]:
     return [m.experiment_id for m in members]
 
 
+def _reactor_display(slot: str | None, number: int | None) -> str | None:
+    """The "Reactor" cell: the slot label (R07 / P03 / CF02), else the bare number.
+
+    A number with no slot is a legacy row on a type that holds no physical slot
+    (Autoclave). Always text, so the Excel column has one type.
+    """
+    if slot:
+        return slot
+    return str(number) if number is not None else None
+
+
 def condition_rows(db: Session, members: list[Member]) -> list[dict]:
     rows = _rows(db, "SELECT * FROM v_experiment_conditions"
                      " WHERE experiment_id = ANY(:ids)", {"ids": _ids(members)})
+    for row in rows:
+        row["reactor"] = _reactor_display(row.get("reactor_slot"),
+                                          row.get("reactor_number"))
     return _ordered_by_member(members, rows, lambda r: 0)
 
 
@@ -686,7 +700,7 @@ EXPERIMENT_COLUMNS: list[Column] = [
     ("date", "Start date"),  # issue #168: was "Date"
     ("researcher", "Researcher"),
     ("sample_id", "Sample ID"),
-    ("reactor_number", "Reactor number"),
+    ("reactor", "Reactor"),
     ("description", "Description"),
 ]
 
@@ -705,9 +719,17 @@ def build_selection_workbook(db: Session, experiment_ids: list[str],
     view = {r["experiment_id"]: r for r in _rows(
         db, "SELECT * FROM v_experiments WHERE experiment_id = ANY(:ids)",
         {"ids": [m.experiment_id for m in members]})}
+    # v_experiments has no reactor_slot; v_experiment_conditions does.
+    slots = {r["experiment_id"]: r["reactor_slot"] for r in _rows(
+        db, "SELECT experiment_id, reactor_slot FROM v_experiment_conditions"
+            " WHERE experiment_id = ANY(:ids)",
+        {"ids": [m.experiment_id for m in members]})}
     experiments = [
         {**view.get(m.experiment_id, {}), "base_id": m.base_id,
-         "is_variant": m.is_variant}
+         "is_variant": m.is_variant,
+         "reactor": _reactor_display(
+             slots.get(m.experiment_id),
+             view.get(m.experiment_id, {}).get("reactor_number"))}
         for m in members]
     tabs = [("Experiments", EXPERIMENT_COLUMNS, experiments)
             ] + _data_tabs(db, members)

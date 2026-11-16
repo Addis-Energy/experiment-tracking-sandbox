@@ -479,7 +479,8 @@ that kind, Conditions, Additives, Notes), then
 
 | Experiments column | Source |
 |--------------------|--------|
-| Experiment ID, Status, Experiment type, Start date, Researcher, Sample ID, Reactor number, Description | `v_experiments` (**Start date** is `date`, the experiment start; the header read `Date` before issue #168, so an Excel lookup on that header text needs updating) |
+| Experiment ID, Status, Experiment type, Start date, Researcher, Sample ID, Description | `v_experiments` (**Start date** is `date`, the experiment start; the header read `Date` before issue #168, so an Excel lookup on that header text needs updating) |
+| Reactor | The slot label from `v_experiment_conditions.reactor_slot` (`R07`, `P03` for a Parr vessel, `CF02`). A legacy row with a number but no slot (Autoclave) shows the bare number; always text. The header read `Reactor number` and held the bare integer before 2026-11-16, so an Excel lookup on that header text needs updating. The **Conditions** tab (both exports) carries the same `Reactor` column in place of `Reactor number` |
 | Base ID, is_variant | computed from the lineage |
 
 Summary keys, in order: `Experiment count`, `Series count`, `Base IDs`,
