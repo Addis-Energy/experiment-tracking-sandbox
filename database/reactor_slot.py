@@ -14,6 +14,7 @@ This module is the ONLY definition of that mapping. It is imported by:
   - backend/services/bulk_uploads/experiment_status.py
   - backend/services/bulk_uploads/new_experiments.py
   - backend/api/routers/experiments.py, conditions.py, dashboard.py
+  - backend/services/bulk_uploads/master_bulk_upload.py  (reactor cell check only)
 
 It deliberately imports nothing from `database.models` or `backend` so any layer
 can use it. The Alembic backfill in
@@ -173,3 +174,42 @@ def series_for_label(prefix: str, experiment_type: object | None) -> str | None:
             f"'{experiment_type}' (expected '{default or 'no reactor'}')"
         )
     return None
+
+
+def slot_label(prefix: str, number: int) -> str | None:
+    """Canonical label for a (prefix, number) pair ('P', 3 -> 'P03'); None if not a slot."""
+    return _format_slot(prefix, number)
+
+
+def parse_reactor_reference(value: object) -> tuple[int, str | None]:
+    """Read a reactor a person typed, to compare or filter with: (number, prefix or None).
+
+    Stricter than `parse_reactor_cell`, which the write paths use: a decimal
+    (7.5), zero, a negative and a bool all raise ValueError here instead of
+    being truncated or passed through, because a reference that silently became
+    another reactor would compare against the wrong vessel.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"Not a reactor: {value!r}")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"Not a whole reactor number: {value!r}")
+    number, prefix = parse_reactor_cell(value)
+    if number <= 0:
+        raise ValueError(f"Not a reactor: {value!r}")
+    return number, prefix
+
+
+def reactor_reference_matches(
+    number: int,
+    prefix: str | None,
+    stored_number: int | None,
+    stored_slot: str | None,
+) -> bool:
+    """Does a typed reference name the stored reactor?
+
+    A label ('P03') must equal the stored slot. A bare number states no series,
+    so it is compared with the stored number only: '3' matches R03, P03 and CF03.
+    """
+    if prefix is None:
+        return number == stored_number
+    return slot_label(prefix, number) == stored_slot

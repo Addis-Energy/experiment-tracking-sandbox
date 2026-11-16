@@ -92,3 +92,41 @@ def test_derive_reactor_slot_tolerates_float_and_string_numbers():
     assert derive_reactor_slot(5.0, "HPHT") == "R05"
     assert derive_reactor_slot("7", "HPHT") == "R07"
     assert derive_reactor_slot("not a number", "HPHT") is None
+
+
+# --- Reactor references typed by a person (reactor-labels, 2026-11-16) -------
+
+from database.reactor_slot import (  # noqa: E402
+    parse_reactor_reference,
+    reactor_reference_matches,
+    slot_label,
+)
+
+
+def test_slot_label():
+    assert slot_label("P", 3) == "P03"
+    assert slot_label("CF", 12) == "CF12"
+    assert slot_label("R", 0) is None
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("P03", (3, "P")), ("r7", (7, "R")), (" CF2 ", (2, "CF")),
+    (7, (7, None)), (7.0, (7, None)), ("7", (7, None)),
+])
+def test_parse_reactor_reference(value, expected):
+    assert parse_reactor_reference(value) == expected
+
+
+@pytest.mark.parametrize("value", [7.5, "7.5", 0, "R0", -1, "Parr 3", "", True])
+def test_parse_reactor_reference_rejects(value):
+    with pytest.raises(ValueError):
+        parse_reactor_reference(value)
+
+
+def test_reactor_reference_matches():
+    assert reactor_reference_matches(3, "P", 3, "P03")
+    assert not reactor_reference_matches(3, "R", 3, "P03")
+    assert reactor_reference_matches(3, None, 3, "P03")      # bare number: number only
+    assert not reactor_reference_matches(4, None, 3, "P03")
+    assert not reactor_reference_matches(3, "R", None, None)  # nothing stored
+    assert reactor_reference_matches(3, None, 3, None)        # legacy number, no slot

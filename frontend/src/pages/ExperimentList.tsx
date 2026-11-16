@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import { experimentsApi, type ExperimentListItem, type ExperimentStatus } from '@/api/experiments'
 import { runPathFor } from '@/utils/experimentId'
+import { reactorFilterParam } from '@/utils/reactorSlots'
 import {
   Table, TableHead, TableBody, TableRow, Th, Td,
   Badge, Button, Input, Select, PageSpinner, StatusBadge, useToast,
@@ -67,7 +68,7 @@ export function ExperimentListPage() {
       experiment_type: typeFilter || undefined,
       search: experimentIdFilter || undefined,
       sample_id: sampleFilter || undefined,
-      reactor_number: reactorFilter ? parseInt(reactorFilter) : undefined,
+      reactor: reactorFilterParam(reactorFilter),
       description: descriptionFilter || undefined,
       date_from: dateFrom || undefined,
       date_to: dateTo || undefined,
@@ -157,7 +158,7 @@ export function ExperimentListPage() {
           </div>
           <div className="w-24">
             <Input
-              placeholder="Reactor #"
+              placeholder="Reactor"
               value={reactorFilter}
               onChange={(e) => { setReactorFilter(e.target.value); resetPage() }}
             />
@@ -422,10 +423,10 @@ function ExperimentRow({ exp, child, groupBadge }: { exp: ExperimentListItem; ch
             onClick={(e) => e.stopPropagation()}
             className="text-red-400 hover:text-red-300"
           >
-            {exp.reactor_number}
+            {exp.reactor_slot ?? exp.reactor_number}
           </Link>
         ) : (
-          exp.reactor_number
+          exp.reactor_slot ?? exp.reactor_number
         )}
       </Td>
       <Td onClick={(e) => e.stopPropagation()}>

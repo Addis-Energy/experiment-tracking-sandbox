@@ -106,6 +106,22 @@ uploads.)
 | Sampled Solution Volume (mL) | | Volume of production fluid collected at this timepoint (mL) |
 | Modification Note | | What was done to the vial at this timepoint (drives the MOD badge). Also accepted (template v3): `Modification`. Stored as a **modification note** on the timepoint |
 | OVERWRITE | | `TRUE` / `FALSE` — overwrite existing result row at same timepoint. Also accepted: `Overwrite` |
+| Reactor | | A slot label — `R07`, `P03` (Parr), `CF02` — or a plain number. **Checked, never saved.** Also accepted: `Reactor Number`, `Reactor #`. See below |
+
+**The `Reactor` column is a cross-check.** Each row's cell is compared with the
+reactor the app already has for that experiment. If they disagree, the row is
+listed under **Warnings** with what the sheet says and what the app has
+(`12 (HPHT_050): sheet R03, app P03`). The results still upload, and the
+experiment's reactor is **not** changed — to move an experiment to a different
+vessel, use its Conditions tab or the Experiment Status upload.
+
+- Use a label to catch a Parr / Yushen mix-up. A plain `3` is compared on the
+  number only, so it matches `R03`, `P03` and `CF03` alike.
+- A cell on an experiment with no reactor in the app (a serum vial, say) is
+  listed as a mismatch (`app none`).
+- A cell that isn't a label or a whole number (`Parr 3`, `7.5`) is listed under
+  Warnings as unreadable and ignored.
+- A blank cell, a `0`, or a sheet without the column does nothing.
 
 Rows where both Experiment ID and Duration (Days) are present create or update a
 `ScalarResults` record. The calc engine re-runs for every affected row.

@@ -71,6 +71,17 @@ describe('DataExportPage', () => {
     )
   })
 
+  it('passes a reactor label to the list as `reactor`', async () => {
+    renderPage()
+    await userEvent.type(screen.getByLabelText('Reactor'), 'CF1')
+    await waitFor(() =>
+      expect(experimentsApi.list).toHaveBeenLastCalledWith(
+        expect.objectContaining({ reactor: 'CF1' }),
+      ),
+    )
+    expect(vi.mocked(experimentsApi.list).mock.calls.at(-1)![0]).not.toHaveProperty('reactor_number')
+  })
+
   it('passes the additive filter to the list', async () => {
     renderPage()
     await screen.findByText('CF_027')

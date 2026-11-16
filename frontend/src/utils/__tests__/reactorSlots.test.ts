@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { slotLabelsFor, slotToConditions } from '../reactorSlots'
+import { reactorFilterParam, slotLabelsFor, slotToConditions } from '../reactorSlots'
 
 describe('reactorSlots (issue #147)', () => {
   it('splits a picked label into number and series', () => {
@@ -17,5 +17,19 @@ describe('reactorSlots (issue #147)', () => {
   it('has no slots for non-occupancy types', () => {
     expect(slotLabelsFor('Serum')).toEqual([])
     expect(slotLabelsFor(null)).toEqual([])
+  })
+})
+
+describe('reactorFilterParam (reactor-labels)', () => {
+  it('passes a complete label or number, trimmed', () => {
+    expect(reactorFilterParam('P3')).toBe('P3')
+    expect(reactorFilterParam(' r03 ')).toBe('r03')
+    expect(reactorFilterParam('CF1')).toBe('CF1')
+    expect(reactorFilterParam('7')).toBe('7')
+  })
+
+  it('holds back anything the API would reject, so typing never errors', () => {
+    for (const partial of ['', 'P', 'R0', 'abc', '0', 'CF', '3.5'])
+      expect(reactorFilterParam(partial)).toBeUndefined()
   })
 })

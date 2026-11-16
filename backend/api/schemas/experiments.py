@@ -66,6 +66,8 @@ class ExperimentListItem(BaseModel):
     # Joined from conditions (may be None if no conditions recorded yet)
     experiment_type: Optional[str] = None
     reactor_number: Optional[int] = None
+    # Slot label (R07 / P03 / CF02), derived; None when the experiment holds no slot.
+    reactor_slot: Optional[str] = None
     # Derived from additives view
     additives_summary: Optional[str] = None
     # The note typed 'description' (Experiment.description hybrid, issue #118;

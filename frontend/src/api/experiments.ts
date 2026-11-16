@@ -99,6 +99,8 @@ export interface ExperimentListItem {
   created_at: string
   experiment_type: string | null
   reactor_number: number | null
+  /** Slot label (R07 / P03 / CF02); null when the experiment holds no slot. */
+  reactor_slot?: string | null
   additives_summary: string | null
   /** The note typed 'description' (issue #118). */
   description: string | null
@@ -262,6 +264,8 @@ export interface ExperimentListParams {
   sample_id?: string
   experiment_type?: string
   reactor_number?: number
+  /** A slot label ('P3', 'R03', 'CF1') or a plain number (any series). */
+  reactor?: string
   /** Start date bounds, inclusive lab-local (America/New_York) YYYY-MM-DD. */
   date_from?: string
   date_to?: string

@@ -9,6 +9,7 @@ Dashboard sheet column spec (v4, issue #118, 2026-09-08):
   Sampled Solution Volume (mL) | ICP Run Date | GC Run Date | XRD Run Date |
   OVERWRITE | DI H2 (ppm) | DI gas volume (mL) | DI gas pressure (psi)
   [| Tube Number]  (optional, issue #135; see _TUBE_NUMBER)
+  [| Reactor]  (optional, check only, never written; see _REACTOR)
 
 v4 renamed the two free-text columns: v3's 'Description' is 'Observation
 Note' and 'Modification' is 'Modification Note'. Both spellings are accepted
@@ -72,7 +73,9 @@ from backend.services.result_merge_utils import (
     normalize_timepoint,
 )
 from database.experiment_id_parser import split_timepoint_token
+from database.models.conditions import ExperimentalConditions
 from database.models.enums import NoteType
+from database.reactor_slot import parse_reactor_reference, reactor_reference_matches
 
 _PSI_TO_MPA = 0.00689476
 _DASHBOARD_SHEET = "Dashboard"
@@ -148,6 +151,9 @@ _HEADER_ALIASES: Dict[str, str] = {
     "modification note": _MODIFICATION_NOTE,
     "modification": _MODIFICATION_NOTE,
     "tube number": "Tube Number",
+    "reactor": "Reactor",
+    "reactor number": "Reactor",
+    "reactor #": "Reactor",
 }
 
 # H2 as a standalone token, so 'H2S (ppm)' and 'H2O' never look like a dropped
@@ -230,6 +236,15 @@ _RUN_DATE_COLUMNS = ("NMR Run Date", "ICP Run Date", "GC Run Date", "XRD Run Dat
 # _sheet_fields is derived from result_data and names ScalarResults fields.
 # A gas row's Sample Key ('...|Sgas') has no tube, so its XLOOKUP gives 0 (blank).
 _TUBE_NUMBER = "Tube Number"
+
+# Optional reactor column (reactor-labels, authorized by Mat 2026-11-16; spec:
+# docs/superpowers/specs/2026-11-16-reactor-labels-design.md). CHECK ONLY: each
+# row's cell is compared with the reactor stored for its experiment and a
+# disagreement becomes a file-level warning. It is never written, never an
+# error, and takes no part in the vial-day merge -- assigning a vessel belongs
+# to the paths that carry the occupancy checks (wizard, Conditions tab, New
+# Experiments and Experiment Status uploads).
+_REACTOR = "Reactor"
 
 # Free text: distinct values joined, nothing discarded, so no warning needed.
 _JOINED_TEXT_COLUMNS = (_OBSERVATION_NOTE, _MODIFICATION_NOTE)
@@ -618,6 +633,23 @@ def _is_blank_tube(val: Any) -> bool:
     return False
 
 
+def _reactor_cell_text(val: Any) -> Optional[str]:
+    """A reactor cell as the researcher wrote it, or None when it is blank.
+
+    Blank is None, NaN, whitespace, or 0 -- 0 for the same reason as
+    _is_blank_tube: the Dashboard's XLOOKUP returns 0 for an empty source cell.
+    A whole float prints without its '.0' so the warning shows '4', not '4.0'.
+    """
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, numbers.Real):
+        if pd.isna(val) or val == 0:
+            return None
+        return str(int(val)) if float(val).is_integer() else str(val)
+    text = str(val).strip()
+    return text if text and text != "0" else None
+
+
 def _parse_tube(val: Any) -> Optional[int]:
     """A Tube Number cell as a positive int, or None.
 
@@ -910,6 +942,13 @@ def _process_bytes(db: Session, file_bytes: bytes) -> MasterUploadResult:
     # Rows whose tube cell is neither blank nor a positive whole number. The
     # cell is ignored (provenance, like a run date) and reported once below.
     bad_tube_rows: List[int] = []
+    # Reactor cells, read per SHEET row before the merge below: the merged cell
+    # view carries only the columns _merge_group knows, and each row of a
+    # vial-day should answer for its own cell. row -> (number, prefix, text as
+    # written, ID as written). See _REACTOR.
+    reactor_column = _REACTOR in df.columns
+    reactor_cells: Dict[int, Tuple[int, Optional[str], str, str]] = {}
+    bad_reactor_rows: List[int] = []
 
     resolved: List[Tuple[int, str, float, Any, TimepointCheck]] = []
     for idx, row in df.iterrows():
@@ -927,6 +966,14 @@ def _process_bytes(db: Session, file_bytes: bytes) -> MasterUploadResult:
             tube_cell = row.get(_TUBE_NUMBER)
             if not _is_blank_tube(tube_cell) and _parse_tube(tube_cell) is None:
                 bad_tube_rows.append(row_num)
+        if reactor_column:
+            reactor_text = _reactor_cell_text(row.get(_REACTOR))
+            if reactor_text is not None:
+                try:
+                    number, prefix = parse_reactor_reference(reactor_text)
+                    reactor_cells[row_num] = (number, prefix, reactor_text, exp_id)
+                except ValueError:
+                    bad_reactor_rows.append(row_num)
         resolved.append((row_num, exp_id, time_post_reaction, row, check))
 
     # Keyed on the normalized ID, not the raw string: `_id_match.normalize_id`
@@ -1032,6 +1079,18 @@ def _process_bytes(db: Session, file_bytes: bytes) -> MasterUploadResult:
     # Rows where Full Loop overrode a populated direct-injection cell. Reported
     # once, at file level, after the loop (issue #114 item 1).
     superseded_rows: List[int] = []
+    # Reactor cells that disagree with the experiment's stored reactor, as
+    # "<row> (<id>): sheet <cell>, app <stored>". Filled only for vial-days
+    # that were written. One conditions lookup per experiment per file.
+    reactor_mismatches: List[str] = []
+    stored_reactors: Dict[int, Tuple[Optional[int], Optional[str]]] = {}
+    # Sheet rows whose vial-day was written; an unreadable reactor cell is only
+    # reported for these, since its warning says the rest of the row uploaded.
+    written_rows: set = set()
+    # Rows whose check itself failed. The vial-day is already committed when
+    # the check runs, so a failure there must never reach the except branches
+    # below (they roll back the savepoint and report a row error).
+    reactor_unchecked_rows: List[int] = []
     # Rows whose H2 reading landed with no GC Run Date (issue #115).
     missing_gc_date_rows: List[int] = []
     # Denominator for the coverage warning below: rows actually written that
@@ -1144,6 +1203,32 @@ def _process_bytes(db: Session, file_bytes: bytes) -> MasterUploadResult:
             else:
                 updated += 1
             savepoint.commit()
+            written_rows.update(rows)
+            for sheet_row in rows:
+                cell = reactor_cells.get(sheet_row)
+                if cell is None:
+                    continue
+                try:
+                    number, prefix, cell_text, cell_exp_id = cell
+                    fk = exp_result.experiment_fk
+                    if fk not in stored_reactors:
+                        stored = db.query(
+                            ExperimentalConditions.reactor_number,
+                            ExperimentalConditions.reactor_slot,
+                        ).filter(
+                            ExperimentalConditions.experiment_fk == fk
+                        ).order_by(ExperimentalConditions.id).first()
+                        stored_reactors[fk] = tuple(stored) if stored else (None, None)
+                    stored_number, stored_slot = stored_reactors[fk]
+                    if not reactor_reference_matches(number, prefix, stored_number, stored_slot):
+                        app_value = stored_slot or (
+                            str(stored_number) if stored_number is not None else "none"
+                        )
+                        reactor_mismatches.append(
+                            f"{sheet_row} ({cell_exp_id}): sheet {cell_text}, app {app_value}"
+                        )
+                except Exception:
+                    reactor_unchecked_rows.append(sheet_row)
             # di_ppm comes from _resolve_h2's own parse — re-reading the cell
             # here would let this flag drift from the precedence decision if the
             # DI branch ever gains filtering.
@@ -1256,6 +1341,35 @@ def _process_bytes(db: Session, file_bytes: bytes) -> MasterUploadResult:
             f"'{_TUBE_NUMBER}' is not a whole number on {len(bad_tube_rows)} "
             f"row(s)" + _rows_clause([str(r) for r in bad_tube_rows])
             + ". Those cells were ignored; the rest of each row was uploaded."
+        )
+
+    if reactor_mismatches:
+        warnings.append(
+            f"'{_REACTOR}' does not match the reactor stored for the experiment on "
+            f"{len(reactor_mismatches)} row(s) ("
+            + ", ".join(reactor_mismatches[:10])
+            + (f", and {len(reactor_mismatches) - 10} more"
+               if len(reactor_mismatches) > 10 else "")
+            + ")"
+            + ". The results were uploaded and the experiment's reactor was not "
+              "changed; fix the sheet, or change the reactor on the experiment's "
+              "Conditions tab."
+        )
+
+    if reactor_unchecked_rows:
+        warnings.append(
+            f"'{_REACTOR}' could not be checked on {len(reactor_unchecked_rows)} "
+            f"row(s)" + _rows_clause([str(r) for r in reactor_unchecked_rows])
+            + ". The results on those rows were uploaded normally."
+        )
+
+    bad_reactor_rows = [r for r in bad_reactor_rows if r in written_rows]
+    if bad_reactor_rows:
+        warnings.append(
+            f"'{_REACTOR}' could not be read on {len(bad_reactor_rows)} row(s)"
+            + _rows_clause([str(r) for r in bad_reactor_rows])
+            + ". Use a label such as R07, P03 or CF02, or a plain number. Those "
+              "cells were ignored; the rest of each row was uploaded."
         )
 
     variant_spellings = [

@@ -7,7 +7,7 @@ Auth: All endpoints require `Authorization: Bearer <firebase-id-token>` header.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/experiments` | List experiments. Query: `skip`, `limit`, `status`, `experiment_type`, `sample_id`, `researcher`, `search` (case-insensitive partial match on `experiment_id`), `reactor_number`, `date_from`, `date_to` (start date, `YYYY-MM-DD`, inclusive lab-local calendar dates since issue #168: a run started at 14:00 ET on `date_to` is included; an invalid date is a 422), `last_result_from`, `last_result_to` (issue #168: the experiment's last result date, see `last_result_date` below; inclusive, `YYYY-MM-DD`, validated; setting either drops experiments with no dated result), `description` (matches the experiment's first note / Description column), `additive` (case-insensitive partial match on the compound name of any of the experiment's chemical additives), `is_background` (bool, issue #152: `true` = backgrounds only, `false` = samples only, omitted = both), `group_replicates` (bool, default false). `experiment_type`, `reactor_number`, `description`, `additive` and both date pairs are applied in SQL before `skip`/`limit`, so `total` and the returned page always reflect the fully-filtered set (#64). |
+| GET | `/api/experiments` | List experiments. Query: `skip`, `limit`, `status`, `experiment_type`, `sample_id`, `researcher`, `search` (case-insensitive partial match on `experiment_id`), `reactor_number` (integer; any series), `reactor` (text, added 2026-11-16: a slot label such as `P3`, `R03` or `CF1` matches that exact `reactor_slot`; a plain number matches `reactor_number` in any series, including a legacy row with no slot; blank is no filter; anything else, including `0`, is `422` with `Unknown reactor '<value>'; ...`), `date_from`, `date_to` (start date, `YYYY-MM-DD`, inclusive lab-local calendar dates since issue #168: a run started at 14:00 ET on `date_to` is included; an invalid date is a 422), `last_result_from`, `last_result_to` (issue #168: the experiment's last result date, see `last_result_date` below; inclusive, `YYYY-MM-DD`, validated; setting either drops experiments with no dated result), `description` (matches the experiment's first note / Description column), `additive` (case-insensitive partial match on the compound name of any of the experiment's chemical additives), `is_background` (bool, issue #152: `true` = backgrounds only, `false` = samples only, omitted = both), `group_replicates` (bool, default false). `experiment_type`, `reactor_number`, `description`, `additive` and both date pairs are applied in SQL before `skip`/`limit`, so `total` and the returned page always reflect the fully-filtered set (#64). |
 | GET | `/api/experiments/next-id` | Next auto-incremented experiment ID. Query: `type` (Serum/HPHT/Autoclave/Core Flood). Returns `{"next_id": "HPHT_004"}` |
 | GET | `/api/experiments/{experiment_id}/exists` | Check if experiment ID string is already in use |
 | GET | `/api/experiments/{experiment_id}/export` | **Export all** (issue #141): one `.xlsx` for the experiment's whole lineage. See below. |
@@ -71,7 +71,7 @@ When `group_replicates=true`, pagination runs over **top-level rows** instead of
   ID. Grouped mode: the group stem (`SERUM_001`). Flat mode: the
   timepoint-stripped stem (`SERUM_001a`). `experiment_id` continues to name the
   real representative row, which is the earliest non-outlier vial and also
-  supplies `sample_id`, `reactor_number`, `date`, `description` and
+  supplies `sample_id`, `reactor_number`, `reactor_slot`, `date`, `description` and
   `additives_summary`.
 - `vial_count` (integer, default 1) — how many experiment rows this row stands
   for. Flat mode counts matched rows sharing the stem; grouped mode counts every
@@ -479,7 +479,8 @@ that kind, Conditions, Additives, Notes), then
 
 | Experiments column | Source |
 |--------------------|--------|
-| Experiment ID, Status, Experiment type, Start date, Researcher, Sample ID, Reactor number, Description | `v_experiments` (**Start date** is `date`, the experiment start; the header read `Date` before issue #168, so an Excel lookup on that header text needs updating) |
+| Experiment ID, Status, Experiment type, Start date, Researcher, Sample ID, Description | `v_experiments` (**Start date** is `date`, the experiment start; the header read `Date` before issue #168, so an Excel lookup on that header text needs updating) |
+| Reactor | The slot label from `v_experiment_conditions.reactor_slot` (`R07`, `P03` for a Parr vessel, `CF02`). A legacy row with a number but no slot (Autoclave) shows the bare number; always text. The header read `Reactor number` and held the bare integer before 2026-11-16, so an Excel lookup on that header text needs updating. The **Conditions** tab (both exports) carries the same `Reactor` column in place of `Reactor number` |
 | Base ID, is_variant | computed from the lineage |
 
 Summary keys, in order: `Experiment count`, `Series count`, `Base IDs`,

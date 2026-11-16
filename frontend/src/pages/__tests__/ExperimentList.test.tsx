@@ -824,3 +824,46 @@ describe('ExperimentListPage — issue #168: start date and last sample date', (
     expect(cell.closest('td')).toHaveAttribute('colspan', '9')
   })
 })
+
+describe('ExperimentListPage — reactor labels', () => {
+  const row = (over: Partial<ExperimentListItem>): ExperimentListItem => ({
+    id: 1, experiment_id: 'HPHT_300', experiment_number: 300, status: 'ONGOING',
+    researcher: null, date: null, sample_id: null, created_at: '2026-07-01T00:00:00Z',
+    experiment_type: 'HPHT', reactor_number: 3, additives_summary: null, description: null,
+    base_experiment_id: 'HPHT_300', parent_experiment_fk: null, replicate_label: null,
+    is_outlier: false, id_timepoint_days: null, ...over,
+  })
+
+  afterEach(() => { vi.clearAllMocks() })
+
+  it('shows the slot label, and the bare number only when there is no slot', async () => {
+    vi.mocked(experimentsApi.list).mockResolvedValue({
+      items: [
+        row({ reactor_slot: 'P03' }),
+        row({ id: 2, experiment_id: 'AUTO_001', experiment_type: 'Autoclave',
+              base_experiment_id: null, reactor_number: 5, reactor_slot: null }),
+      ],
+      total: 2, skip: 0, limit: 25,
+    })
+    render(<ExperimentListPage />, { wrapper })
+    const parr = await screen.findByRole('link', { name: 'P03' })
+    expect(parr).toHaveAttribute('href', '/hpht/HPHT_300')
+    expect(screen.queryByRole('link', { name: '3' })).toBeNull()
+    expect(screen.getByText('5')).toBeInTheDocument()
+  })
+
+  it('sends a complete reactor label as `reactor`, and nothing while it is partial', async () => {
+    vi.mocked(experimentsApi.list).mockResolvedValue({ items: [], total: 0, skip: 0, limit: 25 })
+    render(<ExperimentListPage />, { wrapper })
+    const box = await screen.findByPlaceholderText('Reactor')
+    const last = () => vi.mocked(experimentsApi.list).mock.calls.at(-1)![0]
+
+    await userEvent.type(box, 'P')
+    await waitFor(() => expect(box).toHaveValue('P'))
+    expect(last()?.reactor).toBeUndefined()
+
+    await userEvent.type(box, '3')
+    await waitFor(() => expect(last()?.reactor).toBe('P3'))
+    expect(last()).not.toHaveProperty('reactor_number')
+  })
+})

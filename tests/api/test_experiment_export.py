@@ -47,14 +47,16 @@ _NUM = iter(range(98500, 99000))
 
 
 def _experiment(db, exp_id, *, date_=None, status=ExperimentStatus.COMPLETED,
-                experiment_type="Core Flood", description=None):
+                experiment_type="Core Flood", description=None,
+                reactor_number=3, reactor_series=None):
     exp = Experiment(experiment_id=exp_id, experiment_number=next(_NUM),
                      status=status, date=date_)
     db.add(exp)
     db.flush()
     db.add(ExperimentalConditions(
         experiment_fk=exp.id, experiment_id=exp.experiment_id,
-        experiment_type=experiment_type, reactor_number=3, pore_volume_mL=20.0,
+        experiment_type=experiment_type, reactor_number=reactor_number,
+        reactor_series=reactor_series, pore_volume_mL=20.0,
         rock_mass_g=50.0, temperature_c=90.0,
     ))
     if description:
@@ -778,3 +780,40 @@ def test_experiments_tab_header_is_start_date(client, db_session, reporting_view
     assert "Start date" in headers and "Date" not in headers
     by_id = {r["Experiment ID"]: r for r in exps}
     assert by_id["CFE_001"]["Start date"] == _naive_lab(root.date)
+
+
+# --- Reactor label (reactor-labels, 2026-11-16) ------------------------------
+
+_REACTOR_IDS = ["RXE_P", "RXE_R", "RXE_CF", "RXE_AUTO", "RXE_NONE"]
+_REACTOR_EXPECTED = {"RXE_P": "P03", "RXE_R": "R03", "RXE_CF": "CF03",
+                     "RXE_AUTO": "3", "RXE_NONE": None}
+
+
+def _seed_reactors(db):
+    _experiment(db, "RXE_P", experiment_type="HPHT", reactor_series="P")
+    _experiment(db, "RXE_R", experiment_type="HPHT")
+    _experiment(db, "RXE_CF", experiment_type="Core Flood")
+    _experiment(db, "RXE_AUTO", experiment_type="Autoclave")
+    _experiment(db, "RXE_NONE", experiment_type="HPHT", reactor_number=None)
+
+
+def _reactor_column(ws):
+    headers, rows = _table(ws)
+    assert headers.count("Reactor") == 1
+    assert "Reactor number" not in headers
+    return {r["Experiment ID"]: r["Reactor"] for r in rows}
+
+
+def test_selection_export_shows_reactor_label_on_both_tabs(
+        client, db_session, reporting_views):
+    _seed_reactors(db_session)
+    _resp, wb = _post(client, _REACTOR_IDS, include_series=False)
+    assert _reactor_column(wb["Experiments"]) == _REACTOR_EXPECTED
+    assert _reactor_column(wb["Conditions"]) == _REACTOR_EXPECTED
+
+
+@pytest.mark.parametrize("exp_id", _REACTOR_IDS)
+def test_series_export_shows_reactor_label(client, db_session, reporting_views, exp_id):
+    _seed_reactors(db_session)
+    _resp, wb = _get(client, exp_id)
+    assert _reactor_column(wb["Conditions"]) == {exp_id: _REACTOR_EXPECTED[exp_id]}

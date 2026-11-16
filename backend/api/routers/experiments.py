@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 from database.models.experiments import Experiment, ExperimentNotes, ModificationsLog
 from database.models.enums import ExperimentStatus, NoteType
-from database.reactor_slot import derive_reactor_slot
+from database.reactor_slot import derive_reactor_slot, parse_reactor_reference, slot_label
 from database.experiment_id_parser import split_timepoint_token
 from backend.services.replicate_collapse import collapse_by_stem, timepoint_stem_expr
 from backend.api.dependencies.db import get_db
@@ -207,6 +207,7 @@ def _build_list_item(exp: Experiment, lookups: _ListLookups) -> dict:
     cond = lookups.conditions.get(exp.id)
     item_data["experiment_type"] = cond.experiment_type if cond else None
     item_data["reactor_number"] = cond.reactor_number if cond else None
+    item_data["reactor_slot"] = cond.reactor_slot if cond else None
     item_data["additives_summary"] = lookups.additives.get(exp.id)
     # Issue #118 PR3: the description is the note typed 'description'
     # (Experiment.description hybrid), no longer the lowest-id note.
@@ -225,6 +226,7 @@ def list_experiments(
     sample_id: str | None = None,
     experiment_type: str | None = None,
     reactor_number: int | None = None,
+    reactor: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     last_result_from: date | None = None,
@@ -278,6 +280,23 @@ def list_experiments(
         stmt = stmt.where(ExperimentalConditions.experiment_type == experiment_type)
     if reactor_number is not None:
         stmt = stmt.where(ExperimentalConditions.reactor_number == reactor_number)
+    if reactor and reactor.strip():
+        # A label (P3, R03, CF1) names one slot; a bare number states no series,
+        # so it matches that number in any series -- including a legacy row
+        # with a number and no slot.
+        try:
+            number, prefix = parse_reactor_reference(reactor.strip())
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown reactor '{reactor}'; use a label such as R07, "
+                       f"P03 or CF02, or a number",
+            )
+        if prefix is None:
+            stmt = stmt.where(ExperimentalConditions.reactor_number == number)
+        else:
+            stmt = stmt.where(
+                ExperimentalConditions.reactor_slot == slot_label(prefix, number))
     if description:
         stmt = stmt.where(Experiment.description.ilike(f"%{description}%"))
     if is_background is not None:
