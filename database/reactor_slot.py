@@ -14,6 +14,7 @@ This module is the ONLY definition of that mapping. It is imported by:
   - backend/services/bulk_uploads/experiment_status.py
   - backend/services/bulk_uploads/new_experiments.py
   - backend/api/routers/experiments.py, conditions.py, dashboard.py
+  - backend/services/bulk_uploads/master_bulk_upload.py  (reactor cell check only)
 
 It deliberately imports nothing from `database.models` or `backend` so any layer
 can use it. The Alembic backfill in
