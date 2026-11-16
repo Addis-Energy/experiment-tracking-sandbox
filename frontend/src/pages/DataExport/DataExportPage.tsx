@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useMutation, useQuery, keepPreviousData } from '@tanstack/react-query'
 import { experimentsApi, type ExperimentListItem } from '@/api/experiments'
 import { Button, PageSpinner, useToast } from '@/components/ui'
+import { reactorFilterParam } from '@/utils/reactorSlots'
 import { EMPTY_FILTERS, ExportFilters, type ExportFilterValues } from './ExportFilters'
 import { ExportResultsTable, rowKey } from './ExportResultsTable'
 
@@ -32,7 +33,7 @@ export function DataExportPage() {
       experiment_type: debouncedFilters.experimentType || undefined,
       search: debouncedFilters.search.trim() || undefined,
       sample_id: debouncedFilters.sampleId.trim() || undefined,
-      reactor_number: debouncedFilters.reactor ? parseInt(debouncedFilters.reactor, 10) : undefined,
+      reactor: reactorFilterParam(debouncedFilters.reactor),
       description: debouncedFilters.description.trim() || undefined,
       additive: debouncedFilters.additive.trim() || undefined,
       researcher: debouncedFilters.researcher.trim() || undefined,

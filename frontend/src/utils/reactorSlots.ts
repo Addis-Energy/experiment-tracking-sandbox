@@ -48,3 +48,12 @@ export function slotToConditions(
   if (!match) return null
   return { reactor_number: Number(match[2]), reactor_series: match[1] === 'P' ? 'P' : null }
 }
+
+/** The Reactor filter text as the list API's `reactor` param: a slot label
+ *  ('P3', 'R03', 'CF1') or a plain number, trimmed. Undefined while the text is
+ *  blank or still partial ('P', 'R0'), so typing a label never sends a value
+ *  the API answers with 422. Mirrors database/reactor_slot.py::parse_reactor_reference. */
+export function reactorFilterParam(text: string): string | undefined {
+  const trimmed = text.trim()
+  return /^(cf|r|p)?\s*0*[1-9]\d*$/i.test(trimmed) ? trimmed : undefined
+}

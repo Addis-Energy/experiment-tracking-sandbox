@@ -57,7 +57,7 @@ interface TextField {
 const TEXT_FIELDS: TextField[] = [
   { key: 'search', placeholder: 'Experiment ID…', width: 'w-44' },
   { key: 'sampleId', placeholder: 'Sample ID…', width: 'w-36' },
-  { key: 'reactor', placeholder: 'Reactor #', width: 'w-24' },
+  { key: 'reactor', placeholder: 'Reactor', width: 'w-24' },
   { key: 'description', placeholder: 'Description…', width: 'w-44' },
   { key: 'additive', placeholder: 'Additive…', width: 'w-40' },
   { key: 'researcher', placeholder: 'Researcher…', width: 'w-40' },
