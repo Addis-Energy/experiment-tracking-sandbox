@@ -1087,6 +1087,10 @@ def _process_bytes(db: Session, file_bytes: bytes) -> MasterUploadResult:
     # Sheet rows whose vial-day was written; an unreadable reactor cell is only
     # reported for these, since its warning says the rest of the row uploaded.
     written_rows: set = set()
+    # Rows whose check itself failed. The vial-day is already committed when
+    # the check runs, so a failure there must never reach the except branches
+    # below (they roll back the savepoint and report a row error).
+    reactor_unchecked_rows: List[int] = []
     # Rows whose H2 reading landed with no GC Run Date (issue #115).
     missing_gc_date_rows: List[int] = []
     # Denominator for the coverage warning below: rows actually written that
@@ -1204,24 +1208,27 @@ def _process_bytes(db: Session, file_bytes: bytes) -> MasterUploadResult:
                 cell = reactor_cells.get(sheet_row)
                 if cell is None:
                     continue
-                number, prefix, cell_text, cell_exp_id = cell
-                fk = exp_result.experiment_fk
-                if fk not in stored_reactors:
-                    stored = db.query(
-                        ExperimentalConditions.reactor_number,
-                        ExperimentalConditions.reactor_slot,
-                    ).filter(
-                        ExperimentalConditions.experiment_fk == fk
-                    ).order_by(ExperimentalConditions.id).first()
-                    stored_reactors[fk] = tuple(stored) if stored else (None, None)
-                stored_number, stored_slot = stored_reactors[fk]
-                if not reactor_reference_matches(number, prefix, stored_number, stored_slot):
-                    app_value = stored_slot or (
-                        str(stored_number) if stored_number is not None else "none"
-                    )
-                    reactor_mismatches.append(
-                        f"{sheet_row} ({cell_exp_id}): sheet {cell_text}, app {app_value}"
-                    )
+                try:
+                    number, prefix, cell_text, cell_exp_id = cell
+                    fk = exp_result.experiment_fk
+                    if fk not in stored_reactors:
+                        stored = db.query(
+                            ExperimentalConditions.reactor_number,
+                            ExperimentalConditions.reactor_slot,
+                        ).filter(
+                            ExperimentalConditions.experiment_fk == fk
+                        ).order_by(ExperimentalConditions.id).first()
+                        stored_reactors[fk] = tuple(stored) if stored else (None, None)
+                    stored_number, stored_slot = stored_reactors[fk]
+                    if not reactor_reference_matches(number, prefix, stored_number, stored_slot):
+                        app_value = stored_slot or (
+                            str(stored_number) if stored_number is not None else "none"
+                        )
+                        reactor_mismatches.append(
+                            f"{sheet_row} ({cell_exp_id}): sheet {cell_text}, app {app_value}"
+                        )
+                except Exception:
+                    reactor_unchecked_rows.append(sheet_row)
             # di_ppm comes from _resolve_h2's own parse — re-reading the cell
             # here would let this flag drift from the precedence decision if the
             # DI branch ever gains filtering.
@@ -1339,10 +1346,21 @@ def _process_bytes(db: Session, file_bytes: bytes) -> MasterUploadResult:
     if reactor_mismatches:
         warnings.append(
             f"'{_REACTOR}' does not match the reactor stored for the experiment on "
-            f"{len(reactor_mismatches)} row(s)" + _rows_clause(reactor_mismatches)
+            f"{len(reactor_mismatches)} row(s) ("
+            + ", ".join(reactor_mismatches[:10])
+            + (f", and {len(reactor_mismatches) - 10} more"
+               if len(reactor_mismatches) > 10 else "")
+            + ")"
             + ". The results were uploaded and the experiment's reactor was not "
               "changed; fix the sheet, or change the reactor on the experiment's "
               "Conditions tab."
+        )
+
+    if reactor_unchecked_rows:
+        warnings.append(
+            f"'{_REACTOR}' could not be checked on {len(reactor_unchecked_rows)} "
+            f"row(s)" + _rows_clause([str(r) for r in reactor_unchecked_rows])
+            + ". The results on those rows were uploaded normally."
         )
 
     bad_reactor_rows = [r for r in bad_reactor_rows if r in written_rows]

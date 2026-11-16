@@ -3564,3 +3564,34 @@ def test_unreadable_reactor_cell_on_a_rejected_row_is_not_reported(db_session: S
         db_session, _reactor_excel([(_v3_row("RXM_NOPE_998"), "nonsense")]))
     assert result.created == 0
     assert _reactor_warnings(result) == []
+
+
+def test_reactor_check_failure_never_turns_a_written_row_into_an_error(
+        db_session: Session, monkeypatch):
+    """The check runs after the vial-day is committed; it must not undo or fail it."""
+    from backend.services.bulk_uploads import master_bulk_upload as module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("lookup failed")
+
+    monkeypatch.setattr(module, "reactor_reference_matches", boom)
+    _seed_parr(db_session, "RXM_012", 97012)
+    result = MasterBulkUploadService.from_bytes_ex(
+        db_session, _reactor_excel([(_v3_row("RXM_012"), "R03")]))
+    assert result.errors == []
+    assert result.created == 1
+    assert len(result.feedbacks) == 1
+
+
+def test_reactor_mismatches_beyond_ten_still_name_the_first_ten(db_session: Session):
+    """The row list is the only place the sheet and app values appear."""
+    _seed_parr(db_session, "RXM_013", 97013)
+    result = MasterBulkUploadService.from_bytes_ex(db_session, _reactor_excel(
+        [(_v3_row("RXM_013", float(day)), "R03") for day in range(1, 13)]))
+    assert result.created == 12
+    (warning,) = _reactor_warnings(result)
+    assert "12 row(s)" in warning
+    assert "2 (RXM_013): sheet R03, app P03" in warning
+    assert "11 (RXM_013): sheet R03, app P03" in warning
+    assert "12 (RXM_013)" not in warning
+    assert "and 2 more" in warning
