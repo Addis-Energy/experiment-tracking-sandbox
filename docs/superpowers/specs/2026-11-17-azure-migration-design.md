@@ -33,7 +33,7 @@ In Mat's words, the failure to avoid on the first morning is **"data missing or 
 **Goals**
 - Production runs on Azure before 2026-12-15, with time to spare.
 - Deploys are automated from `main` and no longer depend on the lab PC.
-- New sample photos get durable cloud storage.
+- All sample photos (the 227 existing ones and new uploads) live in durable cloud storage, ready for a later display feature.
 - Daily automated database backups plus a nightly copy outside Azure, with alerts when any of it silently stops.
 - No single-person dependency for owning the cloud account.
 
@@ -43,8 +43,8 @@ In Mat's words, the failure to avoid on the first morning is **"data missing or 
 - No device or IP restriction on the *app*. This is deferred. Likely route: Entra in front of the app plus Conditional Access, if the M365 plan includes Entra ID P1.
 - No move of local development off the dev machines; dev stays as it is.
 - No Power BI work of any kind (no gateway, connector, refresh or access for it). Addis is retiring Power BI (Mat, 2026-11-12 and 2026-11-17). The `v_*` views still migrate because the app itself reads them.
-- **No photo or file viewing.** The app has never displayed photos or attached files: the Photos tab lists only file names (`frontend/src/pages/SampleDetail/PhotosTab.tsx:56-60`) and no endpoint returns file contents. Photos uploaded after the switch are stored, not shown. Viewing them is a separate feature request.
-- **No move of existing attached files** (§5.3).
+- **No photo display in this project.** Today the Photos tab lists only file names (`frontend/src/pages/SampleDetail/PhotosTab.tsx:56-60`) and no endpoint returns image contents. Mat plans photo display on the samples dashboard and sample detail pages as a **separate follow-up feature** after the switch. This design only has to leave the photos in Blob, named so that feature can serve them (§5.3).
+- **No move of existing result and analysis files** (§5.3). Photos do move.
 
 **Anti-goals (a failure even if it technically "works")**
 - Any data missing or shifted (for example dates a day early) after the switch, or a switch that can't be undone quickly.
@@ -57,9 +57,12 @@ In Mat's words, the failure to avoid on the first morning is **"data missing or 
 
 - **Deadline:** 2026-12-15. Switch on **Thursday 2026-12-03 (morning)**; backup date **Thursday 2026-12-10 (morning)**. Mat chose Thursday morning for the data-entry freeze.
 - **Owner:** Mat creates a new **Pay-As-You-Go** Azure subscription with their Addis work account, in the existing Microsoft Entra directory. No subscription exists today (checked 2026-11-17). Applying to Microsoft for Startups (Founders Hub) for credits runs in parallel and must not block anything.
-- **Second owner:** a second Addis person is added as an Owner of the subscription. The person is Mat's choice and is needed before the rehearsal.
+- **Second owner:** Michael Alexander is added as an Owner of the subscription (Mat, 2026-11-17), before the rehearsal. Alerts (§5.10) go to both owners.
 - **Domain:** `data.addisenergy.com`. DNS for addisenergy.com is hosted at GoDaddy and managed by a colleague, who adds the records (a CNAME plus an `asuid` TXT verification record). The colleague also checks for **CAA records**: App Service's free certificate comes from DigiCert, so a CAA record that doesn't allow DigiCert blocks it.
-- **GitHub repo location:** the repo is on a personal account (`mathew-h`). The GitHub-to-Azure sign-in (OIDC) is tied to the repo path, so Mat decides **before the deploy workflow is set up** whether the repo moves to an Addis GitHub organization. If it moves later, the federated credential has to be redone.
+- **GitHub repo moves to an Addis organization** (Mat, 2026-11-17), **before the deploy workflow is set up**, because the GitHub-to-Azure sign-in (OIDC) is tied to the repo path. Today the repo is on Mat's personal account (`mathew-h`).
+  - Steps: create a free GitHub organization for Addis, with Mat and a second admin; transfer the repo; update `origin` on the dev machines and the lab PC. GitHub redirects the old URL, but don't rely on that.
+  - Re-check what the transfer can drop: the CI workflow (`frontend-checks.yml`), branch protection and secrets.
+  - The deploy workflow and its secrets are created only in the new location.
 - **Region:** a US region (default East US; builder may pick East US 2 if capacity or price is better).
 - **Locked components** (`docs/LOCKED_COMPONENTS.md`): models, alembic history, bulk-upload parsers, enums and Firebase auth must not change. The timezone fix (§5.2) is settings only for that reason. The photo storage change touches `backend/api/routers/samples.py` and settings only, not the models.
 - **Packages:**
@@ -138,12 +141,16 @@ Rough cost: $50–100/month (to be priced in the plan).
 
 - **New photos:** uploads go to Blob Storage and deletes remove the blob. `sample_photos.file_path` stores the blob name. There is no schema change: the column stays text.
 - **Storage backend is chosen by config:** local disk (the default; used in dev and tests, so neither needs Azure) or Blob (production).
-- **Existing file rows stay as they are.**
-  - The dev copy of prod (2026-10-26) has 227 `sample_photos`, 363 `result_files` and 3 `analysis_files` rows.
-  - Almost all point to `C:\Users\LabPC\Addis Energy\All Company - Addis Energy\07_Software\addis_energy_research\...`, a SharePoint-synced folder from the old Streamlit app, so the files themselves are safe in SharePoint.
-  - The app never reads those files, so nothing breaks on Azure. The rows simply keep pointing at SharePoint.
-  - Deleting such a row on Azure removes only the row, because the path doesn't exist there.
-  - The plan records the prod counts at the rehearsal.
+- **What exists today.** The dev copy of prod (2026-10-26) has 227 `sample_photos`, 363 `result_files` and 3 `analysis_files` rows. Almost all point to `C:\Users\LabPC\Addis Energy\All Company - Addis Energy\07_Software\addis_energy_research\...`, a SharePoint-synced folder from the old Streamlit app, so the files themselves are safe in SharePoint. One photo row points to a path in Mat's own OneDrive. The plan records the prod counts at the rehearsal.
+- **Existing photos move to Blob** (Mat, 2026-11-17). A committed, re-runnable script handles them:
+  1. For each `sample_photos` row, read the file from the SharePoint-synced folder on the lab PC (or any machine with that folder synced).
+  2. Upload it under the same blob naming as new uploads (`<sample_id>/<stem>_<uuid8><ext>`).
+  3. Rewrite `file_path` to the blob name.
+  4. Report every row whose source file is missing, and never delete a row.
+
+  The script runs at the rehearsal (counts only, against the scratch copy) and again right after the final restore on switch day, and the verification script checks that every photo row resolves to an existing blob. The source files stay in SharePoint as an untouched backup.
+- **Blob naming for the display feature:** the blob name is the only reference the app keeps, so Mat's later display feature can serve a photo either by streaming it through an authenticated endpoint or by issuing a short-lived read link. *My call:* the container stays private either way.
+- **Existing result and analysis files stay where they are** (*my call*; Mat asked only about photos). The 366 rows keep pointing at SharePoint, and the app never reads them, so nothing breaks. Deleting such a row on Azure removes only the row. They can move to Blob later with the same script pattern if a feature needs them.
 
 ### 5.4 Deploys
 
@@ -193,10 +200,10 @@ Team members can get direct Postgres access **on request** (Mat, 2026-11-17). It
 
 | When | What |
 |---|---|
-| Week of 2026-11-23 | Mat creates the subscription, adds a second owner and decides the repo location. Colleague checks CAA. Build: timezone settings, roles script, verification script, photo storage backend, deploy workflow, provisioning scripts, alerts. |
-| Week of 2026-11-30 | **Rehearsal:** provision Azure, restore a copy of prod (no freeze), time it, diff counts and views, check the timezone round-trip, test both restore paths, test the lab PC backup against Azure, team smoke-tests at the `azurewebsites.net` address. |
+| Week of 2026-11-23 | Mat creates the subscription and adds Michael Alexander as owner. The repo moves to the Addis GitHub organization. Colleague checks CAA. Build: timezone settings, roles script, verification script, photo storage backend, photo migration script, deploy workflow, provisioning scripts, alerts. |
+| Week of 2026-11-30 | **Rehearsal:** provision Azure, restore a copy of prod (no freeze), time it, diff counts and views, migrate the 227 photos to Blob and confirm every row resolves, check the timezone round-trip, test both restore paths, test the lab PC backup against Azure, team smoke-tests at the `azurewebsites.net` address. |
 | By 2026-12-02 | Colleague adds the GoDaddy DNS records; managed certificate issued for `data.addisenergy.com`. |
-| **Thu 2026-12-03, morning** | **Switch:** freeze data entry → final dump → restore → verification script → sign-in check → announce the new address (and how to request DB access). Lab PC stays up as a fallback (§5.9). |
+| **Thu 2026-12-03, morning** | **Switch:** freeze data entry → final dump → restore → photo migration script → verification script → sign-in check → announce the new address (and how to request DB access). Lab PC stays up as a fallback (§5.9). |
 | Thu 2026-12-10 | Backup switch date if 12-03 slips. |
 | By 2026-12-15 | Lab PC app retired: ExperimentTracker service and nightly update task disabled, local DB superuser password rotated (it's hard-coded in `backup.ps1` today). The backup task stays, now pointed at Azure (§5.6). |
 
