@@ -1,5 +1,6 @@
 from __future__ import annotations
 from functools import lru_cache
+from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,6 +24,9 @@ class Settings(BaseSettings):
 
     # File storage
     sample_photos_dir: str = "sample_photos"
+    photo_storage: Literal["local", "blob"] = "local"
+    azure_storage_account_url: str = ""
+    azure_photo_container: str = "sample-photos"
 
     # CORS
     cors_origins: str = "http://localhost:5173,http://localhost:8000"
