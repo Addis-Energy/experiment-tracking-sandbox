@@ -29,6 +29,7 @@ class MigrationReport:
     moved: int = 0
     skipped: int = 0
     missing: list[tuple[int, str]] = field(default_factory=list)
+    failed: list[tuple[int, str, str]] = field(default_factory=list)
 
 
 def is_local_ref(ref: str) -> bool:
@@ -70,14 +71,29 @@ def migrate_photos(
             report.missing.append((row.id, row.file_path))
             continue
         if not dry_run:
-            ref = store.save(
-                row.sample_id,
-                row.file_name or source.name,
-                source.read_bytes(),
-                row.file_type or "image/jpeg",
-            )
-            row.file_path = ref
-            db.commit()
+            try:
+                content = source.read_bytes()
+            except OSError as exc:
+                report.failed.append((row.id, row.file_path, str(exc)))
+                continue
+            original = row.file_path
+            try:
+                ref = store.save(
+                    row.sample_id,
+                    row.file_name or source.name,
+                    content,
+                    row.file_type or "image/jpeg",
+                )
+            except Exception as exc:
+                report.failed.append((row.id, original, str(exc)))
+                continue
+            try:
+                row.file_path = ref
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                report.failed.append((row.id, original, str(exc)))
+                continue
         report.moved += 1
     return report
 
@@ -108,10 +124,12 @@ def main(apply_: bool, maps: tuple[str, ...]) -> None:
 
     verb = "moved" if apply_ else "would move"
     click.echo(f"{verb}: {report.moved}  skipped: {report.skipped}  "
-               f"missing: {len(report.missing)}")
+               f"missing: {len(report.missing)}  failed: {len(report.failed)}")
     for photo_id, path in report.missing:
         click.echo(f"MISSING id={photo_id} {path}", err=True)
-    if report.missing:
+    for photo_id, path, err in report.failed:
+        click.echo(f"FAILED id={photo_id} {path}: {err}", err=True)
+    if report.missing or report.failed:
         sys.exit(1)
 
 

@@ -1,4 +1,5 @@
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from backend.services.photo_storage import LocalPhotoStore
 from database.models.samples import SampleInfo, SamplePhotos
@@ -87,3 +88,42 @@ def test_is_local_ref():
     assert is_local_ref("/var/x.jpg")
     assert is_local_ref(r"a\b.jpg")
     assert not is_local_ref("S1/a_1234abcd.jpg")
+
+
+def test_read_error_recorded_and_run_continues(db_session, tmp_path):
+    bad = _src(tmp_path, "bad.jpg")
+    good = _src(tmp_path, "good.jpg")
+    r1 = _seed(db_session, str(bad))
+    r2 = _seed(db_session, str(good))
+    store = LocalPhotoStore(tmp_path / "dest")
+    real = Path.read_bytes
+
+    def fake(self):
+        if self.name == "bad.jpg":
+            raise PermissionError("online-only")
+        return real(self)
+
+    with patch.object(Path, "read_bytes", fake):
+        report = migrate_photos(db_session, store, {}, dry_run=False)
+    assert [f[0] for f in report.failed] == [r1.id]
+    assert report.moved == 1
+    db_session.refresh(r1)
+    db_session.refresh(r2)
+    assert r1.file_path == str(bad)
+    assert r2.file_path != str(good)
+
+
+def test_save_error_rolls_back_and_continues(db_session, tmp_path):
+    a = _src(tmp_path, "a.jpg")
+    b = _src(tmp_path, "b.jpg")
+    r1 = _seed(db_session, str(a))
+    r2 = _seed(db_session, str(b))
+    store = MagicMock()
+    store.save.side_effect = [RuntimeError("boom"), "S/b_12345678.jpg"]
+    report = migrate_photos(db_session, store, {}, dry_run=False)
+    assert len(report.failed) == 1
+    assert report.failed[0][0] == r1.id
+    db_session.refresh(r1)
+    db_session.refresh(r2)
+    assert r1.file_path == str(a)
+    assert r2.file_path == "S/b_12345678.jpg"
