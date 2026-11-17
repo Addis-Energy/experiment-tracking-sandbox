@@ -73,3 +73,10 @@ def test_get_photo_store_blob():
         store = get_photo_store(settings)
     assert isinstance(store, BlobPhotoStore)
     assert cc.call_args.kwargs["container_name"] == "sample-photos"
+
+
+def test_blob_delete_local_path_makes_no_container_call():
+    container = MagicMock()
+    BlobPhotoStore(container).delete(r"C:\x\y.jpg")
+    BlobPhotoStore(container).delete("/var/x.jpg")
+    assert container.mock_calls == []

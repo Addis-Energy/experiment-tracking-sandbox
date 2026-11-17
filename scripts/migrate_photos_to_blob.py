@@ -2,13 +2,13 @@
 """Move sample photos from local/SharePoint paths into the photo store.
 
 Re-runnable: rows whose file_path is already a store reference are skipped.
-Source files are never deleted or altered.
+Source files are never deleted or altered. The target database and photo
+store are printed first; --apply refuses unless PHOTO_STORAGE=blob.
 
 Usage (run from project root; dry run unless --apply):
   python scripts/migrate_photos_to_blob.py [--apply] [--map OLD=NEW ...]
 """
 import os
-import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,10 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import click
 from sqlalchemy.orm import Session
 
-from backend.services.photo_storage import PhotoStore
+# is_local_ref is re-exported here; verify_migration.py and tests import it.
+from backend.services.photo_storage import PhotoStore, is_local_ref
 from database.models.samples import SamplePhotos
 
-_DRIVE_RE = re.compile(r"^[A-Za-z]:[\/]")
+__all__ = ["MigrationReport", "is_local_ref", "migrate_photos", "resolve_source"]
 
 
 @dataclass
@@ -30,11 +31,6 @@ class MigrationReport:
     skipped: int = 0
     missing: list[tuple[int, str]] = field(default_factory=list)
     failed: list[tuple[int, str, str]] = field(default_factory=list)
-
-
-def is_local_ref(ref: str) -> bool:
-    """True for a filesystem path; blob names never match."""
-    return bool(_DRIVE_RE.match(ref)) or "\\" in ref or ref.startswith("/")
 
 
 def _norm(path: str) -> str:
@@ -105,8 +101,8 @@ def migrate_photos(
               help="Remap a path prefix; repeatable.")
 def main(apply_: bool, maps: tuple[str, ...]) -> None:
     from backend.config.settings import get_settings
-    from backend.services.photo_storage import get_photo_store
-    from database.database import SessionLocal
+    from backend.services import photo_storage
+    from database import database
 
     prefix_map = {}
     for item in maps:
@@ -115,8 +111,23 @@ def main(apply_: bool, maps: tuple[str, ...]) -> None:
             raise click.BadParameter(f"expected OLD=NEW, got {item!r}")
         prefix_map[old] = new
 
-    store = get_photo_store(get_settings())
-    db = SessionLocal()
+    settings = get_settings()
+    url = database.engine.url
+    click.echo(f"database: host={url.host} database={url.database} "
+               f"user={url.username} (password masked)")
+    if settings.photo_storage == "blob":
+        click.echo(f"photo store: blob {settings.azure_storage_account_url} "
+                   f"container={settings.azure_photo_container}")
+    else:
+        click.echo(f"photo store: local {settings.sample_photos_dir}")
+    if apply_ and settings.photo_storage != "blob":
+        raise click.ClickException(
+            "--apply needs PHOTO_STORAGE=blob; refusing to migrate into a "
+            "local store."
+        )
+
+    store = photo_storage.get_photo_store(settings)
+    db = database.SessionLocal()
     try:
         report = migrate_photos(db, store, prefix_map, dry_run=not apply_)
     finally:

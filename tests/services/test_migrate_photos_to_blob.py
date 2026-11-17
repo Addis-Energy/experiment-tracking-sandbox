@@ -127,3 +127,24 @@ def test_save_error_rolls_back_and_continues(db_session, tmp_path):
     db_session.refresh(r2)
     assert r1.file_path == str(a)
     assert r2.file_path == "S/b_12345678.jpg"
+
+
+def test_apply_refuses_when_photo_storage_not_blob():
+    from click.testing import CliRunner
+
+    from backend.config.settings import Settings
+    from scripts.migrate_photos_to_blob import main
+
+    local = Settings(_env_file=None, photo_storage="local")
+    with patch("backend.config.settings.get_settings", return_value=local), patch(
+        "database.database.SessionLocal"
+    ) as session_local, patch(
+        "backend.services.photo_storage.get_photo_store"
+    ) as get_store:
+        result = CliRunner().invoke(main, ["--apply"])
+    assert result.exit_code != 0
+    assert "PHOTO_STORAGE" in result.output
+    assert "photo store: local" in result.output
+    assert "database:" in result.output
+    session_local.assert_not_called()
+    get_store.assert_not_called()

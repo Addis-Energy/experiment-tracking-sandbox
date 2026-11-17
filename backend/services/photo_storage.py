@@ -1,6 +1,7 @@
 """Pluggable storage for sample photos (local disk or Azure Blob)."""
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 from typing import Protocol
@@ -10,6 +11,13 @@ from azure.identity import DefaultAzureCredential
 from azure.storage.blob import ContainerClient, ContentSettings
 
 from backend.config.settings import Settings
+
+_DRIVE_RE = re.compile(r"^[A-Za-z]:[\/]")
+
+
+def is_local_ref(ref: str) -> bool:
+    """True for a filesystem path; blob names never match."""
+    return bool(_DRIVE_RE.match(ref)) or "\\" in ref or ref.startswith("/")
 
 
 def photo_blob_name(sample_id: str, filename: str | None) -> str:
@@ -69,6 +77,9 @@ class BlobPhotoStore:
         return name
 
     def delete(self, ref: str) -> None:
+        # A row still holding a local path (not yet migrated) has no blob.
+        if is_local_ref(ref):
+            return
         try:
             self.container.delete_blob(ref)
         except ResourceNotFoundError:
