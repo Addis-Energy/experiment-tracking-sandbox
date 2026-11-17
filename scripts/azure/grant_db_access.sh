@@ -24,6 +24,11 @@ if ! [[ "$NAME" =~ ^[a-z][a-z0-9._]*$ ]]; then
     echo "Invalid name '$NAME': must match ^[a-z][a-z0-9._]*\$" >&2
     exit 2
 fi
+if [[ "$NAME" =~ ^(experiments_app|experiments_backup|reporting_reader|postgres|azuresu)$ \
+    || "$NAME" =~ ^(pg_|azure) ]]; then
+    echo "Refusing reserved role name '$NAME'" >&2
+    exit 2
+fi
 OCTET='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
 if ! [[ "$IP" =~ ^$OCTET\.$OCTET\.$OCTET\.$OCTET$ ]]; then
     echo "Invalid IPv4 address '$IP'" >&2

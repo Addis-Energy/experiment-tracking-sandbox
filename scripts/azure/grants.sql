@@ -15,4 +15,4 @@ GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO experiments_backup;
 ALTER DEFAULT PRIVILEGES FOR ROLE experiments_app IN SCHEMA public
     GRANT SELECT ON TABLES TO reporting_reader, experiments_backup;
 ALTER DEFAULT PRIVILEGES FOR ROLE experiments_app IN SCHEMA public
-    GRANT USAGE, SELECT ON SEQUENCES TO experiments_backup;
+    GRANT SELECT ON SEQUENCES TO experiments_backup;
