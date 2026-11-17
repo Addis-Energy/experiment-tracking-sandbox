@@ -10,7 +10,7 @@ export MSYS_NO_PATHCONV=1   # Git Bash on Windows must not rewrite /subscription
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
-source "${AZURE_ENV:-$HERE/azure.env}"
+source <(tr -d '\r' < "${AZURE_ENV:-$HERE/azure.env}")
 : "${SUBSCRIPTION:?}" "${RG:?}" "${LOCATION:?}" "${APP:?}" "${PG:?}"
 : "${STORAGE:?}" "${PG_ADMIN_USER:?}" "${ADMIN_IP:?}" "${HQ_IP:?}"
 : "${ALERT_EMAILS:?}"
@@ -26,11 +26,13 @@ if [[ -z "${PG_ADMIN_PASSWORD:-}" ]]; then
   read -r -s -p "Postgres admin password: " PG_ADMIN_PASSWORD; echo
 fi
 
+# Git Bash: az -o tsv emits CRLF; every captured value goes through azv.
+azv() { az "$@" | tr -d '\r'; }
 step() { printf '\n== %s ==\n' "$*"; }
 az account set --subscription "$SUBSCRIPTION"
-SUB_ID="$(az account show --query id -o tsv)"
+SUB_ID="$(azv account show --query id -o tsv)"
 az extension add --name scheduled-query --yes --only-show-errors >/dev/null
-ADMIN_OBJECT_ID="${ADMIN_OBJECT_ID:-$(az ad signed-in-user show --query id -o tsv)}"
+ADMIN_OBJECT_ID="${ADMIN_OBJECT_ID:-$(azv ad signed-in-user show --query id -o tsv)}"
 
 # Create-or-update by name. Refuses any 0.* start IP (no Azure-services rule).
 add_fw_rule() {  # name ip
@@ -56,23 +58,17 @@ az webapp identity assign -g "$RG" -n "$APP" -o none
 az webapp config set -g "$RG" -n "$APP" --min-tls-version 1.2 \
   --ftps-state Disabled --always-on true --startup-file "$STARTUP" \
   --generic-configurations '{"healthCheckPath": "/health"}' -o none
-# No direct flag for basic-auth publishing credentials: use the generic
-# resource path. FTP and SCM both off.
-for policy in ftp scm; do
-  az resource update -g "$RG" --resource-type \
-    "Microsoft.Web/sites/basicPublishingCredentialsPolicies" \
-    --namespace Microsoft.Web --parent "sites/$APP" -n "$policy" \
-    --set properties.allow=false -o none
-done
+# Disables both FTP and SCM basic-auth publishing credentials.
+az webapp update -g "$RG" -n "$APP" --basic-auth Disabled -o none
 az webapp config appsettings set -g "$RG" -n "$APP" -o none --settings \
   TZ=America/New_York CORS_ORIGINS=https://data.addisenergy.com \
   PHOTO_STORAGE=blob \
   "AZURE_STORAGE_ACCOUNT_URL=https://${STORAGE}.blob.core.windows.net" \
   "AZURE_PHOTO_CONTAINER=$PHOTO_CONTAINER" \
   SCM_DO_BUILD_DURING_DEPLOYMENT=true
-APP_PRINCIPAL="$(az webapp identity show -g "$RG" -n "$APP" \
+APP_PRINCIPAL="$(azv webapp identity show -g "$RG" -n "$APP" \
   --query principalId -o tsv)"
-APP_ID="$(az webapp show -g "$RG" -n "$APP" --query id -o tsv)"
+APP_ID="$(azv webapp show -g "$RG" -n "$APP" --query id -o tsv)"
 
 step "PostgreSQL Flexible Server 18"
 # The admin password is passed as an argument at create time only.
@@ -96,7 +92,7 @@ add_fw_rule hq "$HQ_IP"
 # Re-read each run; stale app-outbound-* rules from an old IP set are not
 # removed here (delete by hand if the plan moves scale units).
 n=0
-for ip in $(az webapp show -g "$RG" -n "$APP" \
+for ip in $(azv webapp show -g "$RG" -n "$APP" \
   --query possibleOutboundIpAddresses -o tsv | tr ',' ' '); do
   n=$((n + 1)); add_fw_rule "app-outbound-$n" "$ip"
 done
@@ -108,7 +104,8 @@ az storage account show -g "$RG" -n "$STORAGE" >/dev/null 2>&1 ||
     --min-tls-version TLS1_2 -o none
 # Shared-key access is left at its default for now. The lab PC heartbeat
 # should use a user-delegation SAS so shared keys can be disabled later.
-STORAGE_ID="$(az storage account show -g "$RG" -n "$STORAGE" --query id -o tsv)"
+STORAGE_ID="$(azv storage account show -g "$RG" -n "$STORAGE" \
+  --query id -o tsv)"
 assign_blob_role() {  # object-id principal-type
   az role assignment create --role "Storage Blob Data Contributor" \
     --assignee-object-id "$1" --assignee-principal-type "$2" \
@@ -131,7 +128,7 @@ step "Monitoring: Log Analytics, diagnostics, alerts"
 az monitor log-analytics workspace show -g "$RG" -n "$LAW" >/dev/null 2>&1 ||
   az monitor log-analytics workspace create -g "$RG" -n "$LAW" -l "$LOCATION" \
     -o none
-LAW_ID="$(az monitor log-analytics workspace show -g "$RG" -n "$LAW" \
+LAW_ID="$(azv monitor log-analytics workspace show -g "$RG" -n "$LAW" \
   --query id -o tsv)"
 # Blob logs live on the blobServices/default sub-resource, not the account.
 az monitor diagnostic-settings create -n blob-write-logs \
@@ -145,14 +142,15 @@ for e in "${EMAILS[@]}"; do
 done
 az monitor action-group create -g "$RG" -n "$AG" --short-name addisalert \
   "${AG_ARGS[@]}" -o none
-AG_ID="$(az monitor action-group show -g "$RG" -n "$AG" --query id -o tsv)"
+AG_ID="$(azv monitor action-group show -g "$RG" -n "$AG" --query id -o tsv)"
 
-# Heartbeat: fire when no PutBlob to heartbeat/labpc-backup in 36 h.
-# Zero matching rows means count == 0, so the alert fires on silence.
+# Heartbeat: fire when no blob write to heartbeat/labpc-backup in 36 h.
+# Zero matching rows means count < 1, so the alert fires on silence.
 HB_QUERY='StorageBlobLogs
-| where OperationName == "PutBlob" and Uri has "heartbeat/labpc-backup"'
+| where OperationName in ("PutBlob", "PutBlockList")
+| where Uri contains "heartbeat/labpc-backup"'
 az monitor scheduled-query create -g "$RG" -n labpc-backup-heartbeat \
-  --scopes "$LAW_ID" --condition "count 'hb' == 0" \
+  --scopes "$LAW_ID" --condition "count 'hb' < 1" \
   --condition-query hb="$HB_QUERY" --window-size 36h \
   --evaluation-frequency 1h --severity 1 --action-groups "$AG_ID" \
   --skip-query-validation true \
@@ -187,8 +185,10 @@ cat > "$BUDGET_FILE" <<JSON
   "actual100": {"enabled": true, "operator": "GreaterThan", "threshold": 100,
                 "thresholdType": "Actual", "contactEmails": $EMAIL_JSON}}}}
 JSON
-az rest --method put -o none --body "@$BUDGET_FILE" --url \
-  "https://management.azure.com/subscriptions/$SUB_ID/providers/Microsoft.Consumption/budgets/${APP}-monthly?api-version=2023-05-01"
+BUDGET_URL="https://management.azure.com/subscriptions/$SUB_ID"
+BUDGET_URL+="/providers/Microsoft.Consumption/budgets/${APP}-monthly"
+BUDGET_URL+="?api-version=2023-05-01"
+az rest --method put -o none --body "@$BUDGET_FILE" --url "$BUDGET_URL"
 
 step "Done. Manual follow-up (never scripted)"
 cat <<MSG
