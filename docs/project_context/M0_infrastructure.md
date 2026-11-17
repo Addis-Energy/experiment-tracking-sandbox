@@ -9,7 +9,7 @@
 1. Install PostgreSQL for Windows as a system service (auto-start on boot)
 2. Create the `experiments` database and application user with least-privilege permissions
 3. Install NSSM to run uvicorn as a Windows service
-4. Configure Windows Firewall to allow inbound TCP on port 8000 from LAN only
+4. Configure Windows Firewall to allow inbound TCP on port 8000 from the LAN (lab PC deployment; retired 2026-12)
 5. Write `scripts/install_services.bat` — idempotent setup script for the lab PC
 6. Write `scripts/deploy.bat` — replaces `auto_update.bat`:
    - Pull latest from `main`, install/update dependencies, run `alembic upgrade head`, restart uvicorn

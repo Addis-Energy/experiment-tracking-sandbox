@@ -64,9 +64,14 @@ experiment_tracking_sandbox/
 │   ├── project_context/               ← auto-synced mirror for the wider team, do not edit directly
 │   └── sample_data/
 │
-├── scripts/                           ← manage_users.py, migrate-sqlite-to-postgres.py
+├── scripts/                           ← manage_users.py, migrate-sqlite-to-postgres.py,
+│   │                                    migrate_photos_to_blob.py, verify_migration.py
+│   └── azure/                         ← provision.sh, roles.sql, grants.sql, grant_db_access.sh,
+│                                        revoke_db_access.sh (see docs/deployment/AZURE_RUNBOOK.md)
 │
-├── setup.ps1 / update.ps1 / backup.ps1   ← lab PC install & nightly update, see docs/deployment/STARTUP_GUIDE.md
+├── .github/workflows/                 ← deploy-azure.yml (nightly 02:00 Eastern + manual), frontend-checks.yml
+│
+├── setup.ps1 / update.ps1 / backup.ps1   ← lab PC install & nightly update, retired 2026-12 (after the Azure switch); see docs/deployment/STARTUP_GUIDE.md
 │
 └── logs/
 ```

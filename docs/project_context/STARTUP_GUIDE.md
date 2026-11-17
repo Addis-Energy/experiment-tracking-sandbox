@@ -1,5 +1,12 @@
 # Startup Guide — Experiment Tracker Lab PC Setup
 
+> **Production is on Azure** (`https://data.addisenergy.com`, deployed nightly from
+> `main` by GitHub Actions). See `docs/deployment/AZURE_RUNBOOK.md`.
+>
+> **Retired 2026-12 (after the Azure switch on 2026-12-03):** everything below describes
+> the lab PC (Windows service, LAN-only). It stays valid until the switch and as the
+> rollback path (runbook R3); after the lab PC is retired (runbook R6) it is history.
+
 This guide covers everything needed to get the Experiment Tracker running on the lab PC from a fresh clone. Follow each step in order.
 
 ---

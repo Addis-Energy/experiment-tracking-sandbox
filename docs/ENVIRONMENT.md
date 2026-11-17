@@ -1,11 +1,11 @@
 # Environment and Permissions
 
 ## Deployment Reality
-- **Server:** One always-on lab PC on a local area network
-- **Users:** 2-5 researchers accessing via browser at `http://<lab-pc-hostname>:8000`
-- **No cloud, no external hosting, no Docker in production or development**
+- **Production:** Azure App Service (Linux) + PostgreSQL Flexible Server + private Blob storage, at `https://data.addisenergy.com`. Deployed nightly from `main` by GitHub Actions. See `docs/deployment/AZURE_RUNBOOK.md`.
+- **Users:** the team, via browser over HTTPS from any network
+- **No Docker in production or development**
 - React app is served as static files by FastAPI — no separate Node server in production
-- All users are on the same LAN — no public internet exposure needed
+- The previous lab PC on the LAN is retired 2026-12 (after the Azure switch on 2026-12-03)
 - Local dev runs natively (Python venv + `npm run dev`) — see `README.md` Quick Start and `docs/deployment/STARTUP_GUIDE.md`
 
 ## Environment Variables (never hardcode these)
@@ -21,13 +21,22 @@ FIREBASE_CLIENT_EMAIL=
 # App
 APP_ENV=development|production
 API_PORT=8000
-CORS_ORIGINS=http://localhost:5173,http://<lab-pc-hostname>:8000
+CORS_ORIGINS=http://localhost:5173   # Azure: https://data.addisenergy.com
 LOG_LEVEL=INFO
+TZ=                                   # Azure: America/New_York (App Service setting)
 
-# Backups
+# Sample photos
+PHOTO_STORAGE=local                   # local (default) | blob (Azure)
+AZURE_STORAGE_ACCOUNT_URL=            # blob only, e.g. https://<account>.blob.core.windows.net
+AZURE_PHOTO_CONTAINER=sample-photos   # blob only; container is private
+
+# Backups (retired with the lab PC; Azure uses Flexible Server backups, 35 days)
 BACKUP_DIR=
 PUBLIC_COPY_DIR=
 ```
+
+On Azure these are App Service application settings, never committed. `ENABLE_API_DOCS`
+is never set on Azure. Blob access uses the app's managed identity, not a key.
 
 ## Permitted Operations
 - Read and write to this Git repository

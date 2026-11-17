@@ -922,3 +922,17 @@ Alembic `b8c4e2d7f9a1`; the 2026-09-08 entry above (dual-write).
 **Scope and proof:** no stored value changed. On a copy of the dev database, the recalculation migration, the elemental recalculation, 60 background-ammonium edits, 72 sample changes, a cumulative-time update of all 2,011 experiments and migration 014 were run with `develop` and with the branch: 11,369 rows of the four derived-value tables were byte-identical. Not done: E-15 (the work is inside the locked ActLabs parser, #172) and E-13 (waits on #171).
 
 **Related:** `docs/issues/sweep-2026-11-backend-findings.md` (E-01 to E-15, D-04); epic #192.
+
+## 2026-11-17 — Production moves to Azure (issue #196)
+
+**Decision:** Production moves from the lab PC to Azure App Service (Linux, Python 3.13, one worker) with PostgreSQL 18 Flexible Server and a private Blob container for sample photos, at `https://data.addisenergy.com`. Cutover is 2026-12-03; the lab PC is retired by 2026-12-15 (`docs/deployment/AZURE_RUNBOOK.md` R2, R6). Design: `docs/superpowers/specs/2026-11-17-azure-migration-design.md`.
+
+**Contracts:**
+
+- **Timezone:** the server timezone is set (`TZ=America/New_York` on App Service, `America/New_York` on Postgres) instead of changing code, because the bulk-upload parsers are locked and several call `datetime.now()`.
+- **Deploy:** nightly at 02:00 Eastern plus manual dispatch of the "Deploy to Azure" workflow, not on every push to `main`; one run at a time; migrations run in the workflow.
+- **Photos:** stored in a private Blob container (`PHOTO_STORAGE=blob`), blob name `<sample_id>/<stem>_<uuid8><ext>`; `local` stays the default so the lab PC and dev are unaffected.
+- **Researcher DB access:** read-only, one login per person (member of `reporting_reader`), on request, with a firewall rule per IP (`scripts/azure/grant_db_access.sh`). No "Allow Azure services" firewall rule.
+- **Ownership:** `experiments_app` owns the database and every object; default privileges are granted `FOR ROLE experiments_app`.
+
+**Why:** Tailscale access ends, and the team needs the app from any network (see `cloud-hosting-migration-decision` memory, 2026-11-12). Power BI is retired, so the views are read only by the app and by per-person psql logins.

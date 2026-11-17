@@ -1,5 +1,9 @@
 # Power BI Model — Reporting Views
 
+> **Retired.** Power BI is no longer used (2026-11). This file is kept only as a
+> reference for the reporting views and their columns, which the app still reads.
+> For read-only database access see `docs/PSQL_ACCESS.md`.
+
 All views are defined in `database/event_listeners.py` and recreated at application startup.
 They are **not** managed by Alembic migrations. Changes to view SQL take effect on the next
 application restart.
