@@ -92,8 +92,13 @@ def diff(before: dict, after: dict) -> list[str]:
         problems.append(
             f"timezone is {after['timezone']}, expected {EXPECTED_TIMEZONE}"
         )
-    if after.get("photos_unresolved"):
-        problems.append(f"unresolved photo ids: {after['photos_unresolved']}")
+    unresolved = after.get("photos_unresolved")
+    if unresolved is None:
+        problems.append(
+            "photo refs not checked (re-run snapshot with --check-blobs)"
+        )
+    elif unresolved:
+        problems.append(f"unresolved photo ids: {unresolved}")
     return problems
 
 
