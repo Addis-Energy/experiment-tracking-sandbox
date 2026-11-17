@@ -358,10 +358,12 @@ restores cleanly and the app can point at it. Record the time.
 
 ### R1.11b Data-fix console smoke test (R4)
 
-Open the App Service SSH console as in R4 and do R4 steps 1-3 with an existing
-data-fix script, for example `delete_zero_notes_022` (dry run only, no `--apply`).
-Expected: it prints its dry-run report and changes nothing. Write the real venv and
-app-directory paths into R4 step 2.
+Open the App Service SSH console and do R4 steps 2-5 (not the apply) with
+`delete_zero_notes_022`. That script specifically is preview-by-default and only
+writes with `--apply`, so running it without `--apply` is safe. Do not use other
+scripts for this test, because some commit immediately.
+Expected: it prints its report and changes nothing. Write the real venv and
+app-directory paths into R4 step 3.
 If this fails: the usual cause is the venv not activated (`ModuleNotFoundError`),
 `PYTHONPATH=.` missing, or running outside the app directory.
 
@@ -541,12 +543,18 @@ up to the freeze; Azure may have newer data entered since. This carries it back.
 Data-fix scripts (in `database/data_migrations/`) import the `database` package, so
 they run **from the App Service SSH console as `experiments_app`**, never from an
 admin session on a laptop. Reason: importing `database` rebuilds the views, and
-anyone but `experiments_app` would own the rebuilt views. These scripts are dry-run
-by default and take `--apply` (see `database/data_migrations/README.md`).
+anyone but `experiments_app` would own the rebuilt views.
 
-1. Open the console: portal, the web app, Development Tools, SSH (or
+**Scripts differ.** Some preview by default and take `--apply` (for example
+`delete_zero_notes_022`). Others use `--dry-run` or `--confirm`, and some have no
+preview at all and commit as soon as they run. Never assume; read each script first.
+
+1. **Safety dump first, before running anything.** On the lab PC, with
+   `experiments_backup`, run the R3 step 1 dump command to a dated file. Expected:
+   exit 0 and a plausible file size.
+2. Open the console: portal, the web app, Development Tools, SSH (or
    `az webapp ssh -g "$RG" -n "$APP"`).
-2. Get oriented. The SSH session may not have the app's Python environment active:
+3. Get oriented. The SSH session may not have the app's Python environment active:
    ```bash
    ls /                          # look for /antenv
    echo $APPSVC_VIRTUAL_ENV      # path printed here, if set
@@ -558,18 +566,29 @@ by default and take `--apply` (see `database/data_migrations/README.md`).
    Expected: the venv activates, `database/` is in the current dir, and the last
    line prints `DATABASE_URL=postgresql`. Confirm these once during R1 (R1.11b)
    and write the real paths here.
-3. Dry run (the default; changes nothing):
+4. **Read the script before running it.** Check its flags and what it does:
    ```bash
-   PYTHONPATH=. python -m database.data_migrations.<script_name>
+   PYTHONPATH=. python -m database.data_migrations.<script_name> --help
    ```
-   Expected: it prints what would change. Review it with Mat.
-4. **Safety dump before `--apply`.** On the lab PC, with `experiments_backup`, run
-   the R3 step 1 dump command to a dated file.
-5. Apply:
+   or open the file and read the module docstring and argparse section. Flags differ
+   per script (`--apply`, `--dry-run`, `--confirm`, or none). Note whether it has a
+   preview mode.
+   If this fails: if `--help` itself runs the migration (a script with no argparse),
+   stop; read the file instead.
+5. **Preview** with that script's own preview mode (no flag for `--apply`-style
+   scripts, `--dry-run` for those that have it, and so on). Expected: it prints what
+   would change. Review it with Mat.
+   **If the script has no preview mode, stop and get Mat's explicit sign-off before
+   running it**, since running it writes to prod.
+6. **Apply** with the script's apply-mode invocation, for example:
    ```bash
    PYTHONPATH=. python -m database.data_migrations.<script_name> --apply
    ```
-6. Never run `database/init_db.py` (it wipes the schema).
+   (use the flag that script documents: `--apply`, `--confirm`, no `--dry-run`, or no
+   flag for a script with none).
+7. **Verify.** Re-run the preview if the script has one (expect nothing left to do)
+   or query the affected rows. Record what changed in the issue.
+8. Never run `database/init_db.py` (it wipes the schema).
 
 If this fails: if a script needs a package that is not deployed, stop and ask. Do
 not pip-install on the box (it vanishes on the next deploy).
