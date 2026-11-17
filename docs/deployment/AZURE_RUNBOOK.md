@@ -566,15 +566,13 @@ preview at all and commit as soon as they run. Never assume; read each script fi
    Expected: the venv activates, `database/` is in the current dir, and the last
    line prints `DATABASE_URL=postgresql`. Confirm these once during R1 (R1.11b)
    and write the real paths here.
-4. **Read the script before running it.** Check its flags and what it does:
-   ```bash
-   PYTHONPATH=. python -m database.data_migrations.<script_name> --help
-   ```
-   or open the file and read the module docstring and argparse section. Flags differ
-   per script (`--apply`, `--dry-run`, `--confirm`, or none). Note whether it has a
-   preview mode.
-   If this fails: if `--help` itself runs the migration (a script with no argparse),
-   stop; read the file instead.
+4. **Read the script; never run it to find its flags.** Open
+   `database/data_migrations/<script>.py` in the repo (or `cat` it on the console)
+   and read the module docstring and the `if __name__ == "__main__":` block. They
+   show whether the script has a preview mode and which flags it uses (`--apply`,
+   `--dry-run`, `--confirm`, or none). Running a script, even with `--help`, may
+   execute it: many have no argument handling and run their migration
+   unconditionally.
 5. **Preview** with that script's own preview mode (no flag for `--apply`-style
    scripts, `--dry-run` for those that have it, and so on). Expected: it prints what
    would change. Review it with Mat.
