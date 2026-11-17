@@ -1,6 +1,5 @@
 # backend/api/routers/samples.py
 from __future__ import annotations
-import uuid
 import structlog
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, File, Form, UploadFile
@@ -22,6 +21,7 @@ from backend.api.schemas.samples import (
 )
 from backend.services.samples import evaluate_characterized, log_sample_modification, normalize_pxrf_reading_no
 from backend.config.settings import get_settings
+from backend.services.photo_storage import get_photo_store
 
 PHOTO_ALLOWED_TYPES = {"image/jpeg", "image/png"}
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB
@@ -419,18 +419,13 @@ async def upload_photo(
     if len(content) > MAX_FILE_BYTES:
         raise HTTPException(status_code=422, detail="File exceeds 20 MB limit")
 
-    settings = get_settings()
-    dest_dir = Path(settings.sample_photos_dir) / sample_id
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    stem = Path(file.filename or "photo").stem
-    ext = Path(file.filename or "photo").suffix or ".jpg"
-    filename = f"{stem}_{uuid.uuid4().hex[:8]}{ext}"
-    dest = dest_dir / filename
-    dest.write_bytes(content)
+    ref = get_photo_store(get_settings()).save(
+        sample_id, file.filename, content, file.content_type
+    )
 
     photo = SamplePhotos(
         sample_id=sample_id,
-        file_path=str(dest),
+        file_path=ref,
         file_name=file.filename,
         file_type=file.content_type,
         description=description,
@@ -461,9 +456,7 @@ def delete_photo(
     if photo is None:
         raise HTTPException(status_code=404, detail="Photo not found")
 
-    file_path = Path(photo.file_path)
-    if file_path.exists():
-        file_path.unlink()
+    get_photo_store(get_settings()).delete(photo.file_path)
 
     log_sample_modification(
         db, sample_id=sample_id, modified_by=current_user.email,
