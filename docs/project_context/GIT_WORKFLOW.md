@@ -148,5 +148,6 @@ Subject-line prefixes and body bullets by task type: "Commit Format" in `.claude
 `npm run type-check` and `npm test` in `frontend/` on every push to `develop` or `main`
 and every PR to `develop` that touches `frontend/`. Since most merges here are local, the
 push trigger is what runs it; check the result with `gh run list --limit 5`. A failure
-blocks nothing, but fix it before the next deploy: `npm ci` is also what the lab PC's
-`update.ps1` runs. Backend `pytest` is not in CI (it needs a Postgres service).
+blocks nothing, but fix it before the next deploy: `npm ci` is also what the nightly
+Azure deploy workflow (`.github/workflows/deploy-azure.yml`) runs, and what the lab PC's
+`update.ps1` ran (retired 2026-12, after the Azure switch). Backend `pytest` is not in CI (it needs a Postgres service).

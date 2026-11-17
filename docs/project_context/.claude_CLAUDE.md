@@ -20,7 +20,7 @@ and visualize reactor status.
 
 **Current state:** React 18 + FastAPI + PostgreSQL (see `docs/STACK.md` for full table)
 
-**Deployment:** Single always-on lab PC, LAN only, no cloud, no Docker in production.
+**Deployment:** Azure App Service + PostgreSQL Flexible Server + private Blob storage at `https://data.addisenergy.com`, deployed nightly from `main` by GitHub Actions (`docs/deployment/AZURE_RUNBOOK.md`). The lab PC is retired after the 2026-12-03 switch.
 
 ---
 

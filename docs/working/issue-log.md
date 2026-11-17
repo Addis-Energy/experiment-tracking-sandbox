@@ -3133,13 +3133,13 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
     - Step 3's verification POST creates a real user if sign-up is still on; delete it with `manage_users.py delete <uid>`.
     - The forced-refresh test asserts the call shape, not the outcome.
 - **Legacy:** `legacy/streamlit_frontend/auth_components.py` still passes `password=` to `create_pending_user_request` and will show "Registration failed" if ever run. Left as is (superseded, not deployed).
-- **Rollout (Mat; order matters):**
-  - [ ] 0. **Decide on `labpc@addisenergy.com`** first. `frontend/CLAUDE.md` documents its password as equal to its email. Once the app is public, approving it as-is hands anyone who has read the repo full API access. Either rotate its password (`reset-password labpc@addisenergy.com`, then update wherever the lab PC or e2e config signs in with it) or leave it unapproved in prod. Separately, remove the password hint from `frontend/CLAUDE.md`.
-  - [ ] 1. **Before deploy**, from this branch: `.venv/Scripts/python scripts/manage_users.py audit-claims`. For every `MISSING` user who should keep access: `set-claims <uid> researcher` (or `admin`). This includes `labpc` only if step 0 rotated its password. Re-run until the only `MISSING` users are ones you chose to leave out. Skipping this locks those users out (403 on every call).
-  - [ ] 2. Merge and deploy (backend + frontend; no migration, no package change). Users with a tab already open may see 403s until they reload.
-  - [ ] 3. Firebase console → Authentication → Settings → User actions → untick "Enable create (sign-up)". Verify: `POST https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=<VITE_FIREBASE_API_KEY>` with a test email returns `ADMIN_ONLY_OPERATION`.
-  - [ ] 4. `manage_users.py purge-passwords`, then re-run. Expected the second time: `Removed password from 0 pending request(s).`
-  - [ ] 5. Smoke test: request access from the UI → `approve` via the CLI → open the setup link, set a password → sign in. The app loads, and the Firestore doc has no `password` field.
+- **Rollout (Mat; order matters) — completed 2026-11-12, confirmed by Mat; see #170 close comment:**
+  - [x] 0. **Decide on `labpc@addisenergy.com`** first. `frontend/CLAUDE.md` documents its password as equal to its email. Once the app is public, approving it as-is hands anyone who has read the repo full API access. Either rotate its password (`reset-password labpc@addisenergy.com`, then update wherever the lab PC or e2e config signs in with it) or leave it unapproved in prod. Separately, remove the password hint from `frontend/CLAUDE.md`.
+  - [x] 1. **Before deploy**, from this branch: `.venv/Scripts/python scripts/manage_users.py audit-claims`. For every `MISSING` user who should keep access: `set-claims <uid> researcher` (or `admin`). This includes `labpc` only if step 0 rotated its password. Re-run until the only `MISSING` users are ones you chose to leave out. Skipping this locks those users out (403 on every call).
+  - [x] 2. Merge and deploy (backend + frontend; no migration, no package change). Users with a tab already open may see 403s until they reload.
+  - [x] 3. Firebase console → Authentication → Settings → User actions → untick "Enable create (sign-up)". Verify: `POST https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=<VITE_FIREBASE_API_KEY>` with a test email returns `ADMIN_ONLY_OPERATION`.
+  - [x] 4. `manage_users.py purge-passwords`, then re-run. Expected the second time: `Removed password from 0 pending request(s).`
+  - [x] 5. Smoke test: request access from the UI → `approve` via the CLI → open the setup link, set a password → sign in. The app loads, and the Firestore doc has no `password` field.
 - **Tests added:** yes — 403 for missing/false/non-boolean `approved`, the dependency path, passwordless register plus legacy-field ignore plus domain guard, approve ignores and deletes the legacy password, link-failure fallback, purge count, `list_users` claims, CLI approve link/fallback, create claims/role validation, audit-claims exit codes, purge-passwords; vitest forced refresh, unapproved sign-out, header set, register form/payload without password, login shows `authError`. **Docs updated:** yes (`.claude/rules/AUTH.md`).
 
 ## 2026-11-12 | issue #169 — Shared max-1-decimal number formatter (`refactor/issue-169-number-formatter`)
@@ -3195,3 +3195,18 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Outside the code:** the team adds a `Reactor` column to `Master_Reactor_Sampling_Tracker_v2.xlsx`; anyone with an Excel lookup on the old "Reactor number" export header updates it.
 - **Deploy:** backend restart on the lab PC after `update.ps1`; no migration, no package change.
 - **Tests added:** yes — 9 helper, 6 export, 21 Master Results, 15 list API, 5 frontend. Whole-branch review: no critical findings; one important (reactor check could raise after the savepoint commit) and one minor (mismatch detail lost above 10 rows) fixed test-first; final scoped pytest 1984 passed. **Docs updated:** yes. **Decision logged:** no (no lasting architectural decision; the design is in the spec).
+
+## 2026-11-17 | issue #196 — Migrate production to Azure (feat/issue-196-azure-migration)
+- **Files changed:** `.claude/CLAUDE.md` (Deployment line only), `.claude/commands/deploy.md` (Step 0 and Step 6), `README.md`, `docs/STACK.md`, `docs/ENVIRONMENT.md` (new settings `PHOTO_STORAGE`, `AZURE_STORAGE_ACCOUNT_URL`, `AZURE_PHOTO_CONTAINER`, `TZ`), `docs/GIT_WORKFLOW.md`, `docs/DIRECTORY_STRUCTURE.md`, `docs/PSQL_ACCESS.md` (rewritten for Azure; `FOR ROLE experiments_app` added to the default-privileges example; Power BI guidance removed), `docs/deployment/PRODUCTION_DEPLOYMENT.md` and `STARTUP_GUIDE.md` (lab PC content marked retired 2026-12), `docs/user_guide/ONBOARDING.md` (Power BI part replaced by read-only access request) and `USER_MANUAL.md` (URL `https://data.addisenergy.com`), `docs/POWERBI_MODEL.md` (Retired banner), `docs/milestones/M0_infrastructure.md` (one phrase). Earlier tasks of the plan added the Azure code, scripts, workflow and `docs/deployment/AZURE_RUNBOOK.md`.
+- **Tests added:** no in this task (docs only); the plan's earlier tasks added tests under `tests/services/`.
+- **Decision logged:** yes, `docs/working/decisions.md` 2026-11-17. Cutover is Thu 2026-12-03; until then the lab PC is still production and its docs stay valid.
+- **Final review fixes (whole branch):**
+  - `backup.ps1` now runs `pg_dump -w`.
+  - The runbook gets the Section 0 local `pgpass.conf` prerequisite, which is verified with `psql -w` because the pre-update script still hard-codes its password.
+  - `provision.sh` prints the real `FIREBASE_*` names, and the heartbeat alert is created disabled (enabled at R2 step 6).
+  - `BlobPhotoStore.delete` skips local refs, and `is_local_ref` moved into `photo_storage.py`.
+  - The photo migration prints its target and refuses `--apply` without `PHOTO_STORAGE=blob`.
+  - The workflow sets `TZ` for alembic.
+  - The runbook's rollback drill uses a scratch DB, `PGSSLMODE` is cleared before local commands, R1.0 sets up the OIDC identity, and photo id=1 is mapped.
+  - Scoped pytest: 1990 passed.
+- **Before `/deploy`:** do runbook Section 0 on the lab PC first, or the nightly backup fails from the first run after `update.ps1`.

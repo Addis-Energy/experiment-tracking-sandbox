@@ -1,0 +1,153 @@
+# Nightly deploy of main to Azure App Service (issue #196). Runs Alembic against
+# Azure PostgreSQL first, then ships the app. One deploy at a time. A scheduled run
+# is skipped when main is already what is deployed; manual dispatch always deploys.
+#
+# Scheduled workflows only run from the repository's default branch, so main must
+# be the default branch for the nightly trigger to fire.
+#
+# Repository secrets:
+#   AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID  (OIDC sign-in)
+#   AZURE_DATABASE_URL  (experiments_app role, sslmode=require)
+#   VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID,
+#   VITE_FIREBASE_STORAGE_BUCKET, VITE_FIREBASE_MESSAGING_SENDER_ID,
+#   VITE_FIREBASE_APP_ID  (baked into the frontend build)
+# Repository variables (not secret):
+#   AZURE_RG (resource group), AZURE_APP (web app name),
+#   AZURE_PG_SERVER (PostgreSQL flexible server name)
+name: Deploy to Azure
+
+on:
+  schedule:
+    # 02:00 EST / 03:00 EDT
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-azure
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      RG: ${{ vars.AZURE_RG }}
+      APP: ${{ vars.AZURE_APP }}
+      PG_SERVER: ${{ vars.AZURE_PG_SERVER }}
+      FW_RULE: gh-runner-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Nightly runs do nothing when the deployed commit is already this one.
+      - name: Check deployed commit
+        id: check
+        run: |
+          deployed=$(az webapp config appsettings list \
+            --resource-group "$RG" --name "$APP" \
+            --query "[?name=='DEPLOYED_SHA'].value" -o tsv)
+          echo "Deployed: ${deployed:-none}; main: $GITHUB_SHA"
+          if [ "$deployed" = "$GITHUB_SHA" ] \
+            && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            echo "Nothing new on main; skipping deploy."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.skip != 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        if: steps.check.outputs.skip != 'true'
+        working-directory: frontend
+        env:
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.skip != 'true'
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install Python dependencies
+        if: steps.check.outputs.skip != 'true'
+        run: pip install -r requirements.txt
+
+      # The database firewall has no Azure-services rule, so the runner's IP is
+      # allowed only for the duration of the migration.
+      - name: Open database firewall for this runner
+        id: fw_add
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          ip=$(curl -fsS https://api.ipify.org)
+          [ -n "$ip" ] || { echo "Could not determine runner IP"; exit 1; }
+          az postgres flexible-server firewall-rule create \
+            --resource-group "$RG" --name "$PG_SERVER" \
+            --rule-name "$FW_RULE" \
+            --start-ip-address "$ip" --end-ip-address "$ip"
+
+      - name: Run Alembic migrations
+        if: steps.check.outputs.skip != 'true'
+        env:
+          DATABASE_URL: ${{ secrets.AZURE_DATABASE_URL }}
+          TZ: America/New_York
+        run: alembic upgrade head
+
+      # Runs even when migrations fail. Skipped if the add step never ran; a rule
+      # that does not exist (add failed midway) is tolerated, with a warning.
+      - name: Close database firewall for this runner
+        if: >-
+          always() && steps.check.outputs.skip != 'true'
+          && steps.fw_add.outcome != 'skipped'
+        run: |
+          az postgres flexible-server firewall-rule delete \
+            --resource-group "$RG" --name "$PG_SERVER" \
+            --rule-name "$FW_RULE" --yes \
+            || echo "::warning::Could not delete firewall rule $FW_RULE"
+
+      # frontend/dist is gitignored but must ship (FastAPI serves it). App Service
+      # installs Python dependencies itself (SCM_DO_BUILD_DURING_DEPLOYMENT).
+      - name: Build deploy package
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          zip -qr deploy.zip . \
+            -x '.git/*' 'frontend/node_modules/*' '.venv/*' 'tests/*' 'docs/*' \
+            'legacy/*' '.github/*' '.superpowers/*' '*__pycache__/*' deploy.zip
+
+      # No publish-profile: SCM basic auth is disabled, so this deploys through
+      # the azure/login OIDC session.
+      - uses: azure/webapps-deploy@v3
+        if: steps.check.outputs.skip != 'true'
+        with:
+          app-name: ${{ vars.AZURE_APP }}
+          package: deploy.zip
+
+      - name: Record deployed commit
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          az webapp config appsettings set \
+            --resource-group "$RG" --name "$APP" \
+            --settings DEPLOYED_SHA="$GITHUB_SHA" --output none

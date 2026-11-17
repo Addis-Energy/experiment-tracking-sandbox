@@ -1,6 +1,6 @@
 # Onboarding Guide -- Experiment Tracking System
 
-Welcome to the Experiment Tracking System. This guide covers two things: how to access the web application and how to connect Power BI to the PostgreSQL database for reporting.
+Welcome to the Experiment Tracking System. This guide covers how to access the web application and how to request optional read-only database access.
 
 ---
 
@@ -8,21 +8,19 @@ Welcome to the Experiment Tracking System. This guide covers two things: how to 
 
 ### What you need
 
-- A computer on the lab network (LAN)
+- A computer with internet access
 - A modern web browser (Chrome, Edge, or Firefox)
 - An `@addisenergy.com` email address
 
 ### Accessing the app
 
-The Experiment Tracking System runs on a dedicated lab PC and is available to anyone on the local network. Open your browser and navigate to:
+From 2026-12-03 the app runs on Azure and is available from any network; until then use the lab PC address over Tailscale as before. Open your browser and navigate to:
 
 ```
-http://<lab-pc-ip>:8000
+https://data.addisenergy.com
 ```
 
-> Ask your lab administrator for the current address.
-
-> **Note:** The app is LAN-only. You must be connected to the lab network to access it. It is not available over the internet.
+> **Note:** Before the switch this address does not exist yet; your lab administrator will confirm the lab PC address to use until then.
 
 ### Creating an account
 
@@ -43,95 +41,20 @@ If you see a "pending approval" message, your account has not yet been approved.
 
 | Problem | What to check |
 |---------|---------------|
-| Page does not load | Confirm you are on the lab network. Try pinging the lab PC's address. |
-| "Connection refused" error | The app service may be stopped. Ask the administrator to check the `ExperimentTracker` Windows Service on the lab PC. |
+| Page does not load | Check your internet connection and that the address is exactly `https://data.addisenergy.com`. |
+| "Service unavailable" or error page | The app may be restarting after the nightly 02:00 update. Wait a minute and retry; if it persists, ask the administrator to check `https://data.addisenergy.com/health`. Before 2026-12-03, check that Tailscale is connected and use the lab PC address instead. |
 | "Pending approval" after registering | Your account needs admin approval. Reach out to the lab admin. |
 | Forgotten password | Contact the lab admin to reset your password via the management CLI. |
 
 ---
 
-## Part 2: Connecting Power BI to PostgreSQL
+## Part 2: Direct database access (optional, read-only)
 
-The database includes several reporting views designed specifically for Power BI dashboards. These views provide flattened, one-row-per-result datasets so you can build dashboards without writing complex joins.
-
-### Prerequisites
-
-- Power BI Desktop installed on your computer
-- Your computer is on the lab network
-- PostgreSQL connection credentials (ask your lab administrator)
-
-### Connection details
-
-You will need the following information. Your administrator will provide the specific values for your environment.
-
-| Setting | Value |
-|---------|-------|
-| Server | `<lab-pc-ip>` (ask your lab administrator) |
-| Port | `5432` |
-| Database | `experiments` |
-| Username | Provided by your admin |
-| Password | Provided by your admin |
-
-### Installing Npgsql (required for PostgreSQL in Power BI)
-
-Power BI does not ship with a PostgreSQL driver. You need to install the Npgsql provider before Power BI can connect.
-
-1. Download **Npgsql v4.0.17** from GitHub: https://github.com/npgsql/npgsql/releases/tag/v4.0.17
-2. On the release page, scroll to the **Assets** section and download `Npgsql-4.0.17.msi`.
-3. Close Power BI Desktop if it is open.
-4. Run the `.msi` installer. When prompted, make sure to check the option **"Install Npgsql for Power BI"** (or "Npgsql GAC Installation"). This registers the driver where Power BI can find it.
-5. Complete the installer and restart Power BI Desktop.
-
-> **Why v4.0.17?** Power BI Desktop requires a .NET Framework (non-Core) Npgsql build registered in the GAC. The v4.0.x line is the last series that ships a traditional MSI installer with GAC support. Newer Npgsql versions (v5+) target .NET Core/.NET 5+ and do not include an MSI, so they will not work with Power BI Desktop's built-in PostgreSQL connector.
-
-### Step-by-step: Connect Power BI to PostgreSQL
-
-1. Open **Power BI Desktop**.
-2. Click **Get Data** on the Home ribbon (or File > Get Data).
-3. In the data source list, search for **PostgreSQL database** and select it. Click **Connect**.
-   - If you do not see a PostgreSQL option, you need to install the Npgsql provider first. See the "Installing Npgsql" section below.
-4. In the connection dialog:
-   - **Server**: enter the lab PC's address (ask your administrator).
-   - **Database**: enter `experiments`.
-   - Choose **DirectQuery** if you want the dashboard to pull live data on each refresh, or **Import** if you prefer to load a snapshot into your Power BI file.
-5. Click **OK**.
-6. When prompted for credentials, select **Database** (not Windows), then enter the PostgreSQL username and password provided by your administrator.
-7. Click **Connect**.
-
-### Choosing tables and views
-
-After connecting, the Navigator panel will show all available tables and views. The most useful sources for reporting are the pre-built views:
-
-**`v_primary_experiment_results`** -- This is the main reporting view. It provides one row per experiment per primary timepoint, with scalar measurements (pH, conductivity, ammonium, H2, yields) and ICP elemental data already joined together. Use this as your primary fact table.
-
-**`v_experiment_additives_summary`** -- One row per experiment with a concatenated text summary of all chemical additives (e.g., "Mg(OH)2 5 g; Magnetite 1 g"). Useful for filtering or displaying additive information alongside results.
-
-You can also connect directly to the underlying tables (`experiments`, `experimental_conditions`, `experimental_results`, `scalar_results`, `icp_results`, etc.) if you need more granular control, but the views will cover most reporting needs.
-
-### Setting up scheduled refresh
-
-Since the app runs on a LAN without cloud access, Power BI scheduled refresh through the Power BI Service will not work directly. Instead, you can:
-
-- **Manual refresh**: Open your `.pbix` file and click **Refresh** on the Home ribbon whenever you want updated data.
-- **Power BI Gateway** (optional): If your organization sets up an On-premises Data Gateway on a machine that can reach both the lab PC and the Power BI Service, you can configure scheduled refresh through the gateway.
-
-### Tips for building dashboards
-
-- Start with `v_primary_experiment_results` as your base table. It already resolves the primary result per timepoint, so you do not need to filter for `is_primary_timepoint_result` yourself.
-- Join `v_experiment_additives_summary` on `experiment_id` to add additive information.
-- If you need experimental conditions (temperature, pressure, rock mass, etc.), add the `experimental_conditions` table and relate it through `experiments`.
-- For sample metadata (rock classification, locality), add `sample_info` and relate it through `experiments.sample_id`.
-- ICP element columns in the view are named with an `icp_` prefix and `_ppm` suffix (e.g., `icp_fe_ppm`, `icp_si_ppm`, `icp_ni_ppm`).
-
-### Troubleshooting Power BI connections
-
-| Problem | What to check |
-|---------|---------------|
-| "Unable to connect" | Verify that PostgreSQL is running on the lab PC (port 5432). Check Windows Firewall on the lab PC allows inbound connections on port 5432. |
-| "Npgsql not installed" | Install the Npgsql provider (see "Installing Npgsql" section above), then restart Power BI Desktop. |
-| Authentication failure | Double-check the username and password. PostgreSQL credentials are separate from your web app login. |
-| Views are missing | The views are created at application startup. Ask the administrator to restart the `ExperimentTracker` service, which will recreate the views. |
-| Stale data in Import mode | Click **Refresh** in Power BI Desktop to pull the latest data. DirectQuery mode always fetches live data. |
+Available after the switch on 2026-12-03. Power BI is no longer used. If you want to query the reporting views directly
+(psql, Python, DBeaver), ask your lab administrator for a personal read-only
+login. Access is by request: give them your current public IP address (search
+"what is my IP"); they add a firewall rule for it and send you a connection
+string. See `docs/PSQL_ACCESS.md` for how to connect and which views to use.
 
 ---
 

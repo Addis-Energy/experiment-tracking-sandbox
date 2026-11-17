@@ -1,41 +1,46 @@
 # Direct Database Access with psql (Read-Only)
 
-This guide covers connecting to the production PostgreSQL database from your own laptop
-over the lab LAN, using `psql` — a command-line tool for running SQL queries — to pull and
-plot your own data. It is a **read-only** alternative to Power BI: no dashboard building,
-no saved reports, just a terminal window and whatever query answers the question you have
-right now.
+This guide covers connecting to the production PostgreSQL database (Azure Database for
+PostgreSQL Flexible Server) from your own laptop, using `psql` — a command-line tool for
+running SQL queries — to pull and plot your own data. It is read-only: no dashboard
+building, no saved reports, just a terminal window and whatever query answers the question
+you have right now.
 
 This guide does not cover pgAdmin, DBeaver, Python/pandas, or any other database client.
 Everything here is `psql` in a terminal, plus one export command (`\copy`).
 
+> Until the Azure switch (2026-12-03) the database is still on the lab PC and reachable
+> only on the lab LAN. The lab PC access instructions that used to be here are retired
+> 2026-12 (after the Azure switch). Power BI is retired.
+
 ---
 
-## 1. When to use this vs. Power BI vs. the app
+## 1. When to use this vs. the app
 
 | Need | Use |
 |---|---|
-| Enter or correct experiment data | **The app** (`http://<lab-pc-hostname>:8000`) — the only place writes are allowed |
-| A recurring, shared, polished dashboard | **Power BI** — see `docs/POWERBI_MODEL.md` |
+| Enter or correct experiment data | **The app** (`https://data.addisenergy.com`) — the only place writes are allowed |
 | "I just need these 30 numbers to plot in Excel/Origin/Python right now" | **psql**, this guide |
-| Exploring a question nobody's built a dashboard for yet | **psql** |
+| Exploring a question nobody's built a view for yet | **psql** |
 
-psql is faster than opening Power BI Desktop for a one-off question, and it exports
-straight to CSV. It will never be the right tool for entering or fixing data — see
-[Section 9](#9-read-only--why-you-cant-write-from-here) for why.
+psql exports straight to CSV. It will never be the right tool for entering or fixing
+data — see [Section 9](#9-read-only--why-you-cant-write-from-here) for why.
 
 ---
 
-## 2. Getting credentials
+## 2. Getting access (by request)
 
-Ask **Mat** (mhearl@addisenergy.com) for access. You'll receive:
+Access is by request. Ask **Mat** (mhearl@addisenergy.com) and send your current public
+IP address (search "what is my IP" in a browser). You get one personal read-only login
+(first.last), created by the administrator with `scripts/azure/grant_db_access.sh`, plus
+a firewall rule for your IP. You'll receive a connection string once; the password is not
+stored anywhere, so keep it in a password manager.
 
-- The lab PC's hostname or IP address on the LAN
-- A read-only username and password
-- The database name (`experiments`)
-
-You'll only be able to connect while on the lab network (same WiFi/LAN as the lab PC) —
-this database is not reachable from the internet, by design (see `docs/ENVIRONMENT.md`).
+- Connections are only accepted from the IP you gave. If your IP changes (new network,
+  travel, ISP renewal), ask for it to be updated; that re-creates your login and rotates
+  the password.
+- TLS is required (`sslmode=require`).
+- Your login is read-only: a member of `reporting_reader`.
 
 **Never share your password over email/Slack in plain text, and never put it in a file
 that gets committed to Git.** Treat it like any other login.
@@ -75,14 +80,16 @@ psql --version
 
 ## 4. Connecting
 
+Use the connection string you were sent:
+
 ```bash
-psql -h <LAB_PC_HOSTNAME> -p 5432 -U <your_readonly_username> -d experiments
+psql "postgresql://<first.last>@<server>.postgres.database.azure.com:5432/experiments?sslmode=require"
 ```
 
-You'll be prompted for your password. If you'd rather use a single connection string:
+You'll be prompted for your password. Or with flags:
 
 ```bash
-psql "postgresql://<your_readonly_username>@<LAB_PC_HOSTNAME>:5432/experiments"
+PGSSLMODE=require psql -h <server>.postgres.database.azure.com -p 5432 -U <first.last> -d experiments
 ```
 
 **How to tell you're connected:** the prompt changes to:
@@ -95,8 +102,9 @@ experiments=>
 superuser prompt would show `=#` instead — you won't see that with a read-only account).
 Everything you type is held until you end it with a semicolon `;` and press Enter.
 
-If the connection hangs or refuses, you're most likely off the lab network, or the
-firewall/role hasn't been set up yet for your account — contact Mat.
+If the connection hangs or times out, your current public IP probably isn't the one on
+the firewall rule; ask Mat to update it. A "password authentication failed" error means a
+wrong or rotated password.
 
 ---
 
@@ -439,7 +447,7 @@ You'll usually want a query's result as a file you can open in Excel, Origin, or
 Python later. Use `\copy` — not plain SQL `COPY`.
 
 **Why `\copy` and not `COPY`:** `COPY` is a server-side SQL command — it writes the file on
-the *database server's* disk (the lab PC), which you don't have filesystem access to and
+the *database server's* disk (on Azure), which you don't have filesystem access to and
 which wouldn't help you anyway. `\copy` is a **psql** command that runs the query on the
 server but streams the result back to psql, which then writes the file on **your own
 laptop**. Since everyone here is connecting from their own machine, `\copy` is what you
@@ -514,102 +522,40 @@ and the audit trail stay correct. If you spot bad data while exploring here, not
 
 ## 11. Where to get help
 
-- **Access, credentials, or firewall issues:** ask Mat.
+- **Access, credentials, or firewall issues:** ask Mat (see Section 2).
 - **Schema or "what does this field mean" questions:** `.claude/rules/MODELS.md` (full
-  field reference) and `docs/POWERBI_MODEL.md` (full view/column reference).
+  field reference) and `docs/POWERBI_MODEL.md` (view/column reference; the Power BI use is retired).
 - **Derived-field formulas** (how yields, H2 amounts, etc. are calculated): `docs/CALCULATIONS.md`.
 - **Data looks wrong:** fix it in the app, not here — see [Section 9](#9-read-only--why-you-cant-write-from-here).
 
 ---
 
-## 12. Administrator setup (one time, Mat only)
+## 12. Administrator setup (Mat only)
 
-**Researchers: nothing below this line is for you — skip it.** This section is the setup
-Mat runs once, directly on the lab PC, to create the read-only role this whole guide
-depends on. No dedicated read-only role currently exists in this repo or on the lab PC —
-this is a new role, proposed from scratch to satisfy the "read-only alternative to Power
-BI" requirement.
+**Researchers: nothing below this line is for you — skip it.**
 
-Everything below is documentation and copy-pasteable SQL/config for Mat to run manually.
-**Nothing in this section is executed by any script, migration, or agent** — the production
-database is not touched by anyone else per `docs/ENVIRONMENT.md`.
+Roles, grants and per-person logins are managed by the scripts in `scripts/azure/` and
+documented step by step in `docs/deployment/AZURE_RUNBOOK.md` (R1.2 and R1.4 for the
+initial roles and grants, R5 for granting and revoking a person). In short:
 
-Placeholders used below — fill these in yourself, they are never real values in this repo:
+- `scripts/azure/roles.sql` creates `experiments_app` (owns the database and every
+  object in it), `reporting_reader` (NOLOGIN group role) and `experiments_backup`.
+- `scripts/azure/grants.sql` runs as `experiments_app` after the restore.
+- `bash scripts/azure/grant_db_access.sh first.last <ipv4>` creates the person's login
+  (`IN ROLE reporting_reader`) and an Azure firewall rule `researcher-first-last` for
+  their IP, then prints the connection string once.
+- `bash scripts/azure/revoke_db_access.sh first.last` drops the login and the rule.
+- There is no "Allow Azure services" (0.0.0.0) firewall rule; only the App Service
+  outbound IPs, admin IPs, the HQ IP and per-researcher IPs are allowed.
 
-- `<READONLY_PASSWORD>` — a password you generate and distribute directly to each
-  teammate (Slack DM, in person, a password manager share — never Git, never this file)
-- `<LAB_SUBNET>` — the lab's LAN CIDR range, e.g. `192.168.1.0/24`
-- `<LAB_PC_HOSTNAME>` / `<LAB_PC_IP>` — the lab PC's own network name/address
-
-### 12.1 Create the role
-
-Connect as a superuser (`psql -U postgres -d experiments`) and run:
+The default privileges must name the owning role, because the app (as `experiments_app`)
+creates and rebuilds tables and views, and a bare `ALTER DEFAULT PRIVILEGES` only covers
+objects created by whoever runs it:
 
 ```sql
-CREATE ROLE reporting_reader WITH LOGIN PASSWORD '<READONLY_PASSWORD>'
-    NOSUPERUSER NOCREATEDB NOCREATEROLE;
-
-GRANT CONNECT ON DATABASE experiments TO reporting_reader;
-GRANT USAGE ON SCHEMA public TO reporting_reader;
-
--- Grants every table AND every view in the public schema — in PostgreSQL,
--- "ALL TABLES" already includes views (and materialized views), so this one
--- statement covers both the base tables and every v_* reporting view. No
--- separate grant is needed for views.
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO reporting_reader;
-
--- So a table or view added *after* this point is readable without
--- having to re-run the GRANT above.
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO reporting_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE experiments_app IN SCHEMA public
+    GRANT SELECT ON TABLES TO reporting_reader;
 ```
 
-Rename `reporting_reader` if you'd prefer a different role name — nothing else in this
-guide depends on that exact name.
-
-### 12.2 Allow LAN connections
-
-Two separate files, two separate purposes — don't confuse them:
-
-**`postgresql.conf`** controls which network interfaces Postgres listens on at all. It does
-**not** accept a subnet/CIDR — only specific IP addresses (or `*` for "every interface").
-To accept connections from anywhere but `localhost`, add the lab PC's own LAN IP:
-
-```
-listen_addresses = 'localhost,<LAB_PC_IP>'
-```
-
-**`pg_hba.conf`** is what actually restricts *who* is allowed to connect from where — this
-is where the lab subnet belongs, not `listen_addresses`. Add a line scoped to the lab
-subnet only (never `0.0.0.0/0`):
-
-```
-host    experiments    reporting_reader    <LAB_SUBNET>    scram-sha-256
-```
-
-**Restart vs. reload — they're different:**
-- `listen_addresses` only takes effect after a **full PostgreSQL service restart**
-  (`services.msc` → restart the PostgreSQL service, or `net stop postgresql-x64-16` /
-  `net start postgresql-x64-16`, adjusting the service name for your installed version).
-- `pg_hba.conf` only needs a **reload**, which doesn't drop existing connections:
-  ```sql
-  SELECT pg_reload_conf();
-  ```
-  (run from any already-connected superuser `psql` session), or restart the service if
-  that's easier to remember.
-
-### 12.3 Windows Firewall
-
-Postgres listening on the right address isn't enough — Windows Firewall on the lab PC must
-also allow inbound port 5432 from the lab subnet:
-
-```powershell
-New-NetFirewallRule -DisplayName "PostgreSQL LAN reporting access" `
-    -Direction Inbound -Protocol TCP -LocalPort 5432 `
-    -RemoteAddress <LAB_SUBNET> -Action Allow
-```
-
-### 12.4 Distributing access
-
-Give each teammate: the lab PC hostname/IP, port `5432`, database name `experiments`,
-username `reporting_reader`, and the password — through a channel that isn't Git or a
-committed file. Point them at Section 2 onward of this guide for everything after that.
+Never run `database/init_db.py` or import the `database` package from an admin session
+against Azure (see the runbook, section 0).

@@ -103,3 +103,6 @@ test-results/
 
 # User onboarding (contains internal IP addresses)
 docs/user_guide/ONBOARDING.md
+
+# Azure provisioning inputs (subscription and IP details)
+scripts/azure/azure.env
