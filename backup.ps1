@@ -20,7 +20,8 @@ $RetainDays  = 30    # Delete backups older than this
 
 # Optional overrides (Azure): DbHost, DbUser, HeartbeatUrl. If the file is
 # absent, the local defaults above apply. The DB password is NOT stored here;
-# it comes from the task account's %APPDATA%\postgresql\pgpass.conf.
+# it comes from the task account's %APPDATA%\postgresql\pgpass.conf, which
+# needs a line for the local DB too (localhost:5432:experiments:postgres:...).
 $ConfigFile = "C:\ProgramData\experiment-tracker\backup.config.psd1"
 if (Test-Path $ConfigFile) {
     $cfg = Import-PowerShellDataFile -Path $ConfigFile
@@ -67,7 +68,9 @@ try {
 
     Log "Starting backup -> $backupFile"
 
-    & "$PgBin\pg_dump.exe" -h $DbHost -U $DbUser -F c -f $backupFile $DbName
+    # -w: never prompt. With no pgpass.conf entry pg_dump fails fast instead of
+    # hanging the scheduled task (which has no time limit) on a password prompt.
+    & "$PgBin\pg_dump.exe" -w -h $DbHost -U $DbUser -F c -f $backupFile $DbName
     if ($LASTEXITCODE -ne 0) { throw "pg_dump failed with exit code $LASTEXITCODE" }
 
     $sizeMB = [math]::Round((Get-Item $backupFile).Length / 1MB, 2)
@@ -76,7 +79,7 @@ try {
     # -- Public copy (SharePoint-synced folder) -----------------------------------
     New-Item -ItemType Directory -Force -Path $PublicDir | Out-Null
     $publicFile = Join-Path $PublicDir "experiments_$timestamp.sql"
-    & "$PgBin\pg_dump.exe" -h $DbHost -U $DbUser -F c -f $publicFile $DbName
+    & "$PgBin\pg_dump.exe" -w -h $DbHost -U $DbUser -F c -f $publicFile $DbName
     if ($LASTEXITCODE -ne 0) { throw "pg_dump (public copy) failed with exit code $LASTEXITCODE" }
     $publicSizeMB = [math]::Round((Get-Item $publicFile).Length / 1MB, 2)
     Log "Public copy complete: $publicFile ($publicSizeMB MB)"

@@ -102,8 +102,9 @@ az storage account show -g "$RG" -n "$STORAGE" >/dev/null 2>&1 ||
   az storage account create -g "$RG" -n "$STORAGE" -l "$LOCATION" \
     --kind StorageV2 --sku Standard_LRS --allow-blob-public-access false \
     --min-tls-version TLS1_2 -o none
-# Shared-key access is left at its default for now. The lab PC heartbeat
-# should use a user-delegation SAS so shared keys can be disabled later.
+# Shared-key access must stay enabled: the lab PC heartbeat uses an
+# account-key SAS bound to the labpc-heartbeat stored access policy (a
+# user-delegation SAS is capped at 7 days). Disabling shared keys breaks it.
 STORAGE_ID="$(azv storage account show -g "$RG" -n "$STORAGE" \
   --query id -o tsv)"
 assign_blob_role() {  # object-id principal-type
@@ -146,6 +147,9 @@ AG_ID="$(azv monitor action-group show -g "$RG" -n "$AG" --query id -o tsv)"
 
 # Heartbeat: fire when no blob write to heartbeat/labpc-backup in 36 h.
 # Zero matching rows means count < 1, so the alert fires on silence.
+# Created disabled: no heartbeat is sent until the switch, so it would fire
+# from day one. The runbook enables it at R2 step 6. Re-running this script
+# re-disables it, so enable it again afterwards if already switched.
 HB_QUERY='StorageBlobLogs
 | where OperationName in ("PutBlob", "PutBlockList")
 | where Uri contains "heartbeat/labpc-backup"'
@@ -153,7 +157,7 @@ az monitor scheduled-query create -g "$RG" -n labpc-backup-heartbeat \
   --scopes "$LAW_ID" --condition "count 'hb' < 1" \
   --condition-query hb="$HB_QUERY" --window-size 36h \
   --evaluation-frequency 1h --severity 1 --action-groups "$AG_ID" \
-  --skip-query-validation true \
+  --skip-query-validation true --disabled true \
   --description "No lab PC backup heartbeat in 36 hours" -o none
 
 # App availability: any 5xx in 15 min, and health check below 100%.
@@ -194,7 +198,14 @@ step "Done. Manual follow-up (never scripted)"
 cat <<MSG
 Set secrets by hand (values are NOT in this script):
   az webapp config appsettings set -g $RG -n $APP --settings \\
-    DATABASE_URL='<database-url>' FIREBASE_PROJECT_ID='<value>' \\
-    FIREBASE_CREDENTIALS='<value>'
+    DATABASE_URL='<database-url>' \\
+    FIREBASE_PROJECT_ID='<project-id>' \\
+    FIREBASE_PRIVATE_KEY='<private-key>' \\
+    FIREBASE_CLIENT_EMAIL='<client-email>' \\
+    FIREBASE_CLIENT_ID='<client-id>' \\
+    FIREBASE_CLIENT_CERT_URL='<client-cert-url>'
+FIREBASE_PRIVATE_KEY is one line with literal \\n sequences (as in the
+service-account JSON), not real line breaks; the app converts them.
 ENABLE_API_DOCS must stay unset on Azure.
+The labpc-backup-heartbeat alert was created disabled; R2 step 6 enables it.
 MSG
