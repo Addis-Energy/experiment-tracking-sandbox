@@ -22,7 +22,8 @@ export AZ_RG="$RG" AZ_PG_SERVER="$PG" PGUSER="$PG_ADMIN_USER"   # used by R5
 az account set --subscription "$SUBSCRIPTION"
 ```
 
-**Prerequisite for R1.** The branch carrying the Azure scripts (including
+**Prerequisite for R1.** Do the local backup password prerequisite below *first*.
+Then: the branch carrying the Azure scripts (including
 `migrate_photos_to_blob.py` and `verify_migration.py`) must be on `main` (run
 `/deploy`), and the lab PC must have run `update.ps1`, which pip-installs
 `requirements.txt` including `azure-storage-blob` and `azure-identity`. This does
@@ -41,15 +42,27 @@ backup password.** `backup.ps1` no longer carries a hard-coded password. It read
    ```
    localhost:5432:experiments:postgres:<local postgres password>
    ```
-3. Still as that account, run the backup by hand:
+3. Still as that account, test the saved password directly. Don't use the lab PC's
+   current `backup.ps1` for this: until the update it still sets its own password,
+   so it would pass even with a missing or mistyped line.
    ```powershell
-   powershell -NoProfile -File C:\path\to\backup.ps1
+   Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+   Remove-Item Env:PGSSLMODE -ErrorAction SilentlyContinue
+   & "C:\Program Files\PostgreSQL\18\bin\psql.exe" -w -h localhost -U postgres `
+     -d experiments -c "select 1"
+   ```
+   Expected: a one-row result showing `1`.
+   If this fails: "fe_sendauth: no password supplied" means the line is missing or
+   in another account's `%APPDATA%`; "password authentication failed" means the
+   password in the line is wrong.
+4. After the first `update.ps1` run that brings this branch onto the lab PC, check
+   the next morning's backup. The backup task runs at 01:00 and the update at 02:00,
+   so the first backup on the new script is the night *after* the update:
+   ```powershell
    Get-Content C:\Logs\experiment-tracker\backup.log -Tail 5
    ```
-   Expected: "Backup complete" and "Public copy complete" in
-   `C:\Logs\experiment-tracker\backup.log`.
-   If this fails: "fe_sendauth: no password supplied" means the line is missing or
-   in another account's `%APPDATA%`.
+   Expected: "Backup complete" and "Public copy complete" with that night's date.
+   If it says `FAILED`, fix the `pgpass.conf` line (step 2) the same day.
 
 Keep this line after the switch: R3 (rollback) goes back to the local DB and relies
 on it.
@@ -366,11 +379,14 @@ default privileges must cover them.
    `az postgres flexible-server delete -g "$RG" -n "$PG-scratch" --yes`.
 2. Lab PC dump into a scratch database: [PS]
    ```powershell
-   createdb -h localhost -U postgres scratch_restore
-   pg_restore --no-owner --no-acl -h localhost -U postgres -d scratch_restore `
-     "C:\Backups\experiments\<latest>.sql"
+   Remove-Item Env:PGSSLMODE -ErrorAction SilentlyContinue  # local server: no SSL
+   $pg = "C:\Program Files\PostgreSQL\18\bin"
+   & "$pg\createdb.exe" -h localhost -U postgres scratch_restore
+   & "$pg\pg_restore.exe" --no-owner --no-acl -h localhost -U postgres `
+     -d scratch_restore "C:\Backups\experiments\<latest>.sql"
    ```
-   Expected: completes; row counts match. Then `dropdb scratch_restore`.
+   Expected: completes; row counts match. Then
+   `& "$pg\dropdb.exe" -h localhost -U postgres scratch_restore`.
 
 ### R1.10 Lab PC backup against Azure
 
@@ -458,8 +474,11 @@ database. The lab PC's `experiments` database is still the live production DB.
 rehearsal.
 
 1. Do R3 step 1 (dump Azure to `C:\Backups\experiments\rollback_azure.dump`).
-2. Restore it into a scratch database and time it. [PS] on the lab PC:
+2. Restore it into a scratch database and time it. [PS] on the lab PC, in the same
+   window. Step 1 set `PGSSLMODE=require` for Azure; the local server doesn't use
+   SSL, so clear it first:
    ```powershell
+   Remove-Item Env:PGSSLMODE -ErrorAction SilentlyContinue
    $pg = "C:\Program Files\PostgreSQL\18\bin"
    Measure-Command {
      & "$pg\createdb.exe" -h localhost -U postgres rollback_drill
@@ -659,8 +678,10 @@ up to the freeze; Azure may have newer data entered since. This carries it back.
    fresh dump of the local DB. Do not rely on the latest `experiments_*.sql` in
    `C:\Backups\experiments`: after the switch those are Azure dumps, not the local
    DB. The `postgres` password comes from the `localhost` line in `pgpass.conf`
-   (Section 0 prerequisite):
+   (Section 0 prerequisite). Step 1 set `PGSSLMODE=require` for Azure; the local
+   server doesn't use SSL, so clear it first or every local command below fails:
    ```powershell
+   Remove-Item Env:PGSSLMODE -ErrorAction SilentlyContinue
    $pg = "C:\Program Files\PostgreSQL\18\bin"
    $t = Get-Date -Format yyyyMMdd_HHmmss
    & "$pg\pg_dump.exe" -h localhost -U postgres -Fc `

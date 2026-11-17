@@ -3200,3 +3200,13 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Files changed:** `.claude/CLAUDE.md` (Deployment line only), `.claude/commands/deploy.md` (Step 0 and Step 6), `README.md`, `docs/STACK.md`, `docs/ENVIRONMENT.md` (new settings `PHOTO_STORAGE`, `AZURE_STORAGE_ACCOUNT_URL`, `AZURE_PHOTO_CONTAINER`, `TZ`), `docs/GIT_WORKFLOW.md`, `docs/DIRECTORY_STRUCTURE.md`, `docs/PSQL_ACCESS.md` (rewritten for Azure; `FOR ROLE experiments_app` added to the default-privileges example; Power BI guidance removed), `docs/deployment/PRODUCTION_DEPLOYMENT.md` and `STARTUP_GUIDE.md` (lab PC content marked retired 2026-12), `docs/user_guide/ONBOARDING.md` (Power BI part replaced by read-only access request) and `USER_MANUAL.md` (URL `https://data.addisenergy.com`), `docs/POWERBI_MODEL.md` (Retired banner), `docs/milestones/M0_infrastructure.md` (one phrase). Earlier tasks of the plan added the Azure code, scripts, workflow and `docs/deployment/AZURE_RUNBOOK.md`.
 - **Tests added:** no in this task (docs only); the plan's earlier tasks added tests under `tests/services/`.
 - **Decision logged:** yes, `docs/working/decisions.md` 2026-11-17. Cutover is Thu 2026-12-03; until then the lab PC is still production and its docs stay valid.
+- **Final review fixes (whole branch):**
+  - `backup.ps1` now runs `pg_dump -w`.
+  - The runbook gets the Section 0 local `pgpass.conf` prerequisite, which is verified with `psql -w` because the pre-update script still hard-codes its password.
+  - `provision.sh` prints the real `FIREBASE_*` names, and the heartbeat alert is created disabled (enabled at R2 step 6).
+  - `BlobPhotoStore.delete` skips local refs, and `is_local_ref` moved into `photo_storage.py`.
+  - The photo migration prints its target and refuses `--apply` without `PHOTO_STORAGE=blob`.
+  - The workflow sets `TZ` for alembic.
+  - The runbook's rollback drill uses a scratch DB, `PGSSLMODE` is cleared before local commands, R1.0 sets up the OIDC identity, and photo id=1 is mapped.
+  - Scoped pytest: 1990 passed.
+- **Before `/deploy`:** do runbook Section 0 on the lab PC first, or the nightly backup fails from the first run after `update.ps1`.
