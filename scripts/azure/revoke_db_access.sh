@@ -8,6 +8,18 @@
 # Optional: PGDATABASE (default experiments), PGSSLMODE (default require)
 set -euo pipefail
 
+# True only if az stderr ($2) is a not-found for the rule's own path ($1),
+# not for the resource group or server (those also say "not found").
+is_rule_not_found() {
+    grep -qiE "firewallRules/$1" <<<"$2" \
+        && grep -qiE 'not found|could not be found|NotFound' <<<"$2"
+}
+# Test hook: revoke_db_access.sh --classify <rule> <stderr text>
+if [ "${1:-}" = "--classify" ]; then
+    is_rule_not_found "$2" "$3"
+    exit $?
+fi
+
 if [ "$#" -ne 1 ]; then
     echo "Usage: $0 <first.last>" >&2
     exit 2
@@ -48,6 +60,15 @@ if [ "$STATE" = "other" ]; then
     exit 1
 fi
 
+# Fail fast on a wrong target: a bad AZ_RG / AZ_PG_SERVER / subscription
+# would otherwise look like "rule not found" while the real rule stays open.
+if ! az postgres flexible-server show --resource-group "$AZ_RG" \
+    --name "$AZ_PG_SERVER" --query id -o tsv >/dev/null; then
+    echo "Cannot reach server '$AZ_PG_SERVER' in resource group '$AZ_RG'" \
+        "(check AZ_RG, AZ_PG_SERVER, az login/subscription)" >&2
+    exit 1
+fi
+
 # Firewall first so no new connections can start. Role is dropped only
 # afterwards, so any failure here leaves the role and the op can re-run.
 if OUT="$(az postgres flexible-server firewall-rule show \
@@ -56,8 +77,7 @@ if OUT="$(az postgres flexible-server firewall-rule show \
     az postgres flexible-server firewall-rule delete \
         --resource-group "$AZ_RG" --name "$AZ_PG_SERVER" \
         --rule-name "$RULE" --yes --output none
-elif grep -qiE 'ResourceNotFound|was not found|could not be found' \
-    <<<"$OUT"; then
+elif is_rule_not_found "$RULE" "$OUT"; then
     echo "Firewall rule $RULE not found; already removed" >&2
 else
     echo "Cannot check firewall rule $RULE: $OUT" >&2
@@ -69,6 +89,7 @@ if [ "$STATE" = "researcher" ]; then
 SELECT format('DROP ROLE %I', :'role')
 \gexec
 SQL
+    echo "Access revoked for $NAME (role dropped)"
+else
+    echo "Access revoked for $NAME (role did not exist)"
 fi
-
-echo "Access revoked for $NAME"

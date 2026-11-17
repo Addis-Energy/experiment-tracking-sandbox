@@ -47,6 +47,14 @@ export PGSSLMODE="${PGSSLMODE:-require}"
 RULE="researcher-${NAME//./-}"
 PW="$(openssl rand -base64 33 | tr -d '/+=\n' | cut -c1-32)"
 
+# Fail fast on a wrong target before creating anything.
+if ! az postgres flexible-server show --resource-group "$AZ_RG" \
+    --name "$AZ_PG_SERVER" --query id -o tsv >/dev/null; then
+    echo "Cannot reach server '$AZ_PG_SERVER' in resource group '$AZ_RG'" \
+        "(check AZ_RG, AZ_PG_SERVER, az login/subscription)" >&2
+    exit 1
+fi
+
 # Password goes in via stdin (heredoc), so it never appears in argv.
 psql -v ON_ERROR_STOP=1 -q -v role="$NAME" -f - <<SQL
 \set pw '$PW'
