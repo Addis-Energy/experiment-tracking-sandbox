@@ -21,6 +21,12 @@ export PGSSLMODE=require
 az account set --subscription "$SUBSCRIPTION"
 ```
 
+**Prerequisite for R1.** The branch carrying the Azure scripts (including
+`migrate_photos_to_blob.py` and `verify_migration.py`) must be on `main` (run
+`/deploy`), and the lab PC must have run `update.ps1`, which pip-installs
+`requirements.txt` including `azure-storage-blob` and `azure-identity`. This does
+not change the lab PC app's behaviour: `PHOTO_STORAGE` defaults to local.
+
 Postgres server parameter `log_statement` must stay `none` (the default) whenever
 `roles.sql` or `grant_db_access.sh` runs. Otherwise `CREATE ROLE ... PASSWORD` is
 logged in plaintext.
@@ -99,14 +105,15 @@ stdin (never `-v`, which shows in the process list):
 ```bash
 read -rs -p "experiments_app password: " APP_PW; echo
 read -rs -p "experiments_backup password: " BACKUP_PW; echo
-export PGUSER=pgadmin PGDATABASE=postgres
+read -rs -p "Azure admin password: " PGPASSWORD; echo   # env, never argv
+export PGPASSWORD PGUSER=pgadmin PGDATABASE=postgres
 {
   printf "\\\\set app_password '%s'\n" "$APP_PW"
   printf "\\\\set backup_password '%s'\n" "$BACKUP_PW"
   cat scripts/azure/roles.sql
 } | psql -v ON_ERROR_STOP=1 -f -
 psql -c "CREATE DATABASE experiments OWNER experiments_app;"
-unset APP_PW BACKUP_PW
+unset APP_PW BACKUP_PW PGPASSWORD
 ```
 
 Expected: no errors; `CREATE DATABASE`. `roles.sql` ends with
@@ -148,8 +155,10 @@ is mandatory so every object is owned by `experiments_app`.
 [bash] Run AS `experiments_app`:
 
 ```bash
+read -rs -p "experiments_app password: " PGPASSWORD; echo; export PGPASSWORD
 PGUSER=experiments_app PGDATABASE=experiments psql -v ON_ERROR_STOP=1 \
   -f scripts/azure/grants.sql
+unset PGPASSWORD
 ```
 
 Expected: no errors. This gives `reporting_reader` and `experiments_backup` their
@@ -166,9 +175,13 @@ read access (existing objects plus default privileges for future ones).
    ```
 3. Snapshot Azure (AFTER). `--check-blobs` is required for the AFTER side or `diff`
    fails with "photo refs not checked" (do this after R1.6 so the photo refs
-   exist; before R1.6 expect missing-blob findings). `DATABASE_URL` = Azure,
-   `experiments_app`:
+   exist; before R1.6 expect missing-blob findings). The check uses the configured
+   photo store, which defaults to local, so set all three shell-only env vars:
+   `DATABASE_URL` (Azure, `experiments_app`), `PHOTO_STORAGE=blob` and
+   `AZURE_STORAGE_ACCOUNT_URL` (and be `az login`ed):
    ```bash
+   export PHOTO_STORAGE=blob AZURE_STORAGE_ACCOUNT_URL=https://<STORAGE>.blob.core.windows.net
+   # DATABASE_URL: set it without echoing it, e.g. read -rs DATABASE_URL; export DATABASE_URL
    python scripts/verify_migration.py snapshot --out after.json --check-blobs
    python scripts/verify_migration.py diff before.json after.json
    ```
@@ -213,8 +226,9 @@ shell-only env vars (never in a `.env`): `DATABASE_URL` (Azure, `experiments_app
    Make the folder available offline and re-run; re-runs are safe and skip rows
    already done. A commit failure after a successful upload leaves an orphan blob
    and the re-run uploads under a new name (harmless).
-5. Now take the AFTER snapshot with `--check-blobs` (R1.5 step 3) and re-run `diff`.
-   Expected: `OK`.
+   Time the `--apply` run: it is inside the freeze window on switch day.
+5. Now take the AFTER snapshot with `--check-blobs` (R1.5 step 3, with all three env
+   vars set) and re-run `diff`. Expected: `OK`.
 
 ### R1.7 Timezone round-trip
 
@@ -288,11 +302,27 @@ default privileges must cover them.
    ```
    <PG>.postgres.database.azure.com:5432:experiments:experiments_backup:<password>
    ```
-3. Create the SAS (write-only, one blob, about 1 year) with
-   `az storage blob generate-sas --account-name "$STORAGE" -c heartbeat
-   -n labpc-backup --permissions cw --expiry <date> --https-only --auth-mode login
-   --as-user --full-uri`. Note the expiry in the issue; a lapsed SAS only shows up
-   as a "Heartbeat FAILED" log line and then an alert.
+3. Create the heartbeat SAS. A user-delegation SAS (`--as-user`) is capped at 7
+   days, so use an account-key SAS tied to a stored access policy on the
+   `heartbeat` container. [bash]
+   ```bash
+   KEY="$(az storage account keys list -g "$RG" -n "$STORAGE" \
+     --query '[0].value' -o tsv | tr -d '\r')"
+   az storage container policy create --account-name "$STORAGE" \
+     --account-key "$KEY" -c heartbeat -n labpc-heartbeat --permissions cw \
+     --expiry "$(date -u -d '+1 year' +%Y-%m-%dT%H:%M:%SZ)"
+   az storage blob generate-sas --account-name "$STORAGE" --account-key "$KEY" \
+     --container-name heartbeat --name labpc-backup \
+     --policy-name labpc-heartbeat --https-only --full-uri -o tsv
+   unset KEY
+   ```
+   Expected: the policy is created (write and create only) and a full blob URL
+   ending in `?sv=...&si=labpc-heartbeat&sig=...` is printed. Put it in
+   `HeartbeatUrl`. Allow about 30 seconds for the policy to take effect. Revoking the
+   URL = `az storage container policy delete`; renewing = extend the policy expiry
+   (`az storage container policy update --expiry ...`); the URL stays the same. Note
+   the expiry in the issue; a lapsed SAS only shows as a "Heartbeat FAILED" log line
+   and then an alert.
 4. Run it by hand as the task account:
    ```powershell
    powershell -NoProfile -File C:\path\to\backup.ps1
@@ -310,12 +340,30 @@ default privileges must cover them.
    firewall (if HQ's IP is dynamic, flag it to Mat now and update the rule).
 5. Confirm the `ExperimentTrackerBackup` scheduled task runs as an account whose
    password will not be rotated (R6).
+6. **Rehearsal only: take the config out of service again.** Until the switch, the
+   nightly backup must keep dumping the live local DB. [PS]
+   ```powershell
+   Rename-Item C:\ProgramData\experiment-tracker\backup.config.psd1 `
+     backup.config.psd1.disabled
+   ```
+   Expected: the file is gone under its old name. R2 puts it back after the final
+   diff passes. (Leaving it in place would silently point the live backup at the
+   rehearsal copy and stop dumping prod.)
 
 ### R1.11 Rollback drill
 
 Run R3 once against the rehearsal data (dump Azure on the lab PC, restore into a
 **scratch** database, not over the real one, during the rehearsal). Expected:
 restores cleanly and the app can point at it. Record the time.
+
+### R1.11b Data-fix console smoke test (R4)
+
+Open the App Service SSH console as in R4 and do R4 steps 1-3 with an existing
+data-fix script, for example `delete_zero_notes_022` (dry run only, no `--apply`).
+Expected: it prints its dry-run report and changes nothing. Write the real venv and
+app-directory paths into R4 step 2.
+If this fails: the usual cause is the venv not activated (`ModuleNotFoundError`),
+`PYTHONPATH=.` missing, or running outside the app directory.
 
 ### R1.12 Team smoke test
 
@@ -332,6 +380,7 @@ Paste this table, filled in, into issue #196:
 |---|---|
 | Lab PC dump size / time | |
 | Restore time (R1.3) | |
+| Photo `--apply` time (R1.6) | |
 | Row counts (BEFORE / AFTER) | |
 | `diff` result | OK / problems |
 | Photo rows moved / missing / failed | /  /  |
@@ -365,30 +414,42 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
 
 1. **Announce the freeze** to the team (Slack): data entry stops at HH:MM, expected
    back at HH:MM, old address stops working.
-2. **Stop the service.** [PS] on the lab PC, as administrator:
+2. **Stop the service and keep it stopped.** [PS] on the lab PC, as administrator.
+   `update.ps1` starts the service at the end of its nightly run even if it was
+   already stopped, and the service is set to auto-start at boot, so stop it and
+   disable both:
    ```powershell
    Stop-Service ExperimentTracker
+   Set-Service ExperimentTracker -StartupType Disabled
+   Disable-ScheduledTask -TaskName ExperimentTrackerUpdate
    Get-Service ExperimentTracker
+   (Get-ScheduledTask ExperimentTrackerUpdate).State
    ```
-   Expected: `Stopped`.
+   Expected: `Stopped`, and `Disabled`. Without this, someone with an old bookmark
+   could write to the frozen DB, and R3 would overwrite those writes.
 3. **Final dump, restore, grants, photos, diff.**
-   - Empty the target first: the rehearsal copy is in the `experiments` database.
-     [bash] as the admin, connected to `postgres`:
+   - Stop the Azure web app first, so nothing holds a connection to the rehearsal
+     database: `az webapp stop -g "$RG" -n "$APP"`.
+   - Then empty the target (the rehearsal copy is in `experiments`). [bash] as the
+     admin, connected to `postgres`, with `PGPASSWORD` from a `read -rs` as in R1.2:
      ```bash
      psql -c "DROP DATABASE experiments;" \
           -c "CREATE DATABASE experiments OWNER experiments_app;"
      ```
      Expected: `DROP DATABASE`, `CREATE DATABASE`. (Roles are kept; no need to rerun
-     `roles.sql`.) Stop the web app first so nothing holds a connection:
-     `az webapp stop -g "$RG" -n "$APP"`.
-   - Do R1.1 (dump), R1.3 (restore, timed), R1.4 (grants), R1.6 (photo
-     `--apply`; fewer rows will move because the rehearsal already migrated most, and
-     already-migrated rows are skipped), and R1.5 (BEFORE and AFTER snapshots,
-     `diff`). The BEFORE snapshot now runs after the service stopped, so counts
-     must match exactly.
+     `roles.sql`.)
+   - Do R1.1 (dump), R1.3 (restore, timed), R1.4 (grants), R1.6 (photo `--apply`,
+     timed) and R1.5 (BEFORE and AFTER snapshots, `diff`). The restore resets every
+     photo row to its local path, so **all ~227 photos are uploaded again**, not
+     just the new ones. The blobs the rehearsal uploaded become orphans (harmless).
+     To clear them first, delete the rehearsal blobs before the photo `--apply`:
+     `az storage blob delete-batch -s sample-photos --auth-mode login --account-name "$STORAGE"`.
+     The BEFORE snapshot runs after the service stopped, so counts must match
+     exactly. The AFTER snapshot needs `DATABASE_URL`, `PHOTO_STORAGE=blob` and
+     `AZURE_STORAGE_ACCOUNT_URL` all set (R1.5).
    - Start the web app: `az webapp start -g "$RG" -n "$APP"`.
-   Expected: `diff` prints `OK`. If it does not, do not continue: go to R3, restart
-   the service and tell the team.
+   Expected: `diff` prints `OK`. If it does not, do not continue: go to R3 and tell
+   the team.
 4. **Custom domain.** In the portal: App Service, Custom domains, Add custom domain,
    `data.addisenergy.com`, validate, then Add binding with an App Service Managed
    Certificate (SNI SSL). Or:
@@ -408,10 +469,20 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
 5. **Sign-in check.** From a browser not previously logged in: sign in at
    `https://data.addisenergy.com`, open an experiment, and view recent data.
    Expected: works, and a photo reference on a sample resolves.
-6. **Announce** the new URL, and how to request database access (message Mat; R5).
+6. **Put the backup config in service.** The rehearsal renamed it away (R1.10 step
+   6). Now that the diff passed, restore it so tonight's backup dumps Azure
+   (and sends the heartbeat). [PS]
+   ```powershell
+   Rename-Item C:\ProgramData\experiment-tracker\backup.config.psd1.disabled `
+     backup.config.psd1
+   ```
+   Expected: the file exists under its real name. Check the log after the first
+   night's run (R1.10 step 4).
+7. **Announce** the new URL, and how to request database access (message Mat; R5).
    Nobody has a database login on day one unless they asked beforehand.
-7. **Leave the lab PC service installed but stopped.** It is the rollback path until
-   a full working day passes without problems. Its local DB stays untouched.
+8. **Leave the lab PC service installed but stopped and disabled** (step 2). It is
+   the rollback path until a full working day passes without problems. Its local
+   DB stays untouched.
 
 If 12-03 slips, the backup date is Thu 2026-12-10.
 
@@ -422,62 +493,86 @@ If 12-03 slips, the backup date is Thu 2026-12-10.
 Use only before the lab PC app is retired (R6). The lab PC database has everything
 up to the freeze; Azure may have newer data entered since. This carries it back.
 
+0. **Announce a freeze and stop Azure writes first.** Otherwise data entered during
+   the dump is lost.
+   ```bash
+   az webapp stop -g "$RG" -n "$APP"
+   ```
+   Expected: the site stops responding.
 1. **Dump Azure on the lab PC** [PS] (it has PG 18 tools and is allowed through the
-   firewall). Use `experiments_backup` or `experiments_app` credentials:
+   firewall). Use `experiments_backup` credentials (password from `pgpass.conf`):
    ```powershell
    $env:PGSSLMODE = 'require'
    & "C:\Program Files\PostgreSQL\18\bin\pg_dump.exe" -h <PG>.postgres.database.azure.com `
      -U experiments_backup -Fc -f C:\Backups\experiments\rollback_azure.dump experiments
    ```
-   Expected: exit 0 (password from `pgpass.conf`).
-2. **Restore over the local DB** (this replaces the local data, so first keep the
-   existing local state: copy the latest `experiments_*.sql` backup aside):
+   Expected: exit 0.
+2. **Restore over the local DB.** This replaces the local data, so first copy the
+   latest `experiments_*.sql` backup aside:
    ```powershell
    $pg = "C:\Program Files\PostgreSQL\18\bin"
    & "$pg\dropdb.exe" -h localhost -U postgres experiments
    & "$pg\createdb.exe" -h localhost -U postgres experiments
-   & "$pg\pg_restore.exe" --no-owner -h localhost -U postgres -d experiments `
+   & "$pg\pg_restore.exe" --no-owner --no-acl -h localhost -U postgres -d experiments `
      C:\Backups\experiments\rollback_azure.dump
    ```
    If the lab PC app's DB role differs from `postgres` (check `DATABASE_URL` in the
-   service config), use `--no-owner --role=<app role>`, or re-grant afterward.
+   service config), add `--role=<app role>` or re-grant afterward.
    Expected: completes without errors.
-3. **Start the service and point the team back:**
+3. **Re-enable and start the service, point the team back.** The switch disabled
+   both (R2 step 2):
    ```powershell
+   Set-Service ExperimentTracker -StartupType Automatic
+   Enable-ScheduledTask -TaskName ExperimentTrackerUpdate
    Start-Service ExperimentTracker
    Get-Service ExperimentTracker
    ```
    Expected: `Running`. Tell the team to use the lab PC address over Tailscale
-   (works until 12-15). Photos entered on Azure live in Blob; the rolled-back rows
-   point at blob references, which the lab PC app cannot display. They are not lost:
-   note it in the issue.
-   No data needs re-entering. Stop the Azure web app so nobody keeps writing to it:
-   `az webapp stop -g "$RG" -n "$APP"`.
+   (works until 12-15). After rollback **all photo rows hold blob references**, so
+   the lab PC app shows no photos until they are migrated back. The photos are not
+   lost: they are still in Blob and in the SharePoint folder. Note it in the issue.
+   Also rename `backup.config.psd1` away (R1.10 step 6) so the nightly backup dumps
+   the local DB again. No data needs re-entering.
 
 ---
 
 ## R4 Data-fix scripts against prod
 
-Scripts that import the `database` package (any repo data-fix, migration or
-analysis script) run **from the App Service SSH console as `experiments_app`**, never
-from an admin session on a laptop. Reason: importing `database` rebuilds the views,
-and anyone but `experiments_app` would own the rebuilt views.
+Data-fix scripts (in `database/data_migrations/`) import the `database` package, so
+they run **from the App Service SSH console as `experiments_app`**, never from an
+admin session on a laptop. Reason: importing `database` rebuilds the views, and
+anyone but `experiments_app` would own the rebuilt views. These scripts are dry-run
+by default and take `--apply` (see `database/data_migrations/README.md`).
 
 1. Open the console: portal, the web app, Development Tools, SSH (or
    `az webapp ssh -g "$RG" -n "$APP"`).
-2. In the console the app environment (including `DATABASE_URL`) is already set:
+2. Get oriented. The SSH session may not have the app's Python environment active:
    ```bash
-   cd /home/site/wwwroot
-   python scripts/<the_fix>.py --dry-run
+   ls /                          # look for /antenv
+   echo $APPSVC_VIRTUAL_ENV      # path printed here, if set
+   source /antenv/bin/activate   # or the path above
+   ls                            # expect database/ and backend/; if not, cd to
+                                 # the extracted app dir (often /tmp/<id>)
+   env | grep DATABASE_URL | cut -c1-20   # confirms app settings are exported
    ```
-   Expected: the dry run prints what would change. Review it, then run without
-   `--dry-run`.
-3. Take a safety dump first for anything destructive (dump on the lab PC with
-   `experiments_backup`, R3 step 1 command, to a dated file).
-4. Never run `database/init_db.py` (it wipes the schema).
+   Expected: the venv activates, `database/` is in the current dir, and the last
+   line prints `DATABASE_URL=postgresql`. Confirm these once during R1 (R1.11b)
+   and write the real paths here.
+3. Dry run (the default; changes nothing):
+   ```bash
+   PYTHONPATH=. python -m database.data_migrations.<script_name>
+   ```
+   Expected: it prints what would change. Review it with Mat.
+4. **Safety dump before `--apply`.** On the lab PC, with `experiments_backup`, run
+   the R3 step 1 dump command to a dated file.
+5. Apply:
+   ```bash
+   PYTHONPATH=. python -m database.data_migrations.<script_name> --apply
+   ```
+6. Never run `database/init_db.py` (it wipes the schema).
 
-If this fails: if a script needs a package not deployed, stop and ask. Do not
-pip-install on the box (it vanishes on the next deploy).
+If this fails: if a script needs a package that is not deployed, stop and ask. Do
+not pip-install on the box (it vanishes on the next deploy).
 
 ---
 
@@ -533,7 +628,8 @@ rollback path is no longer needed. [PS] as administrator on the lab PC.
    Disable-ScheduledTask -TaskName ExperimentTrackerUpdate
    ```
    Expected: `Get-Service ExperimentTracker` shows `Stopped`, and
-   `Get-ScheduledTask ExperimentTrackerUpdate` shows `Disabled`. Do not uninstall
+   `Get-ScheduledTask ExperimentTrackerUpdate` shows `Disabled`. These were already
+   disabled at the switch (R2 step 2); this keeps them so. Do not uninstall
    the service yet.
 2. **Rotate the local `postgres` password.** The old one was hard-coded in
    `backup.ps1` for years and is in git history:
@@ -550,7 +646,9 @@ rollback path is no longer needed. [PS] as administrator on the lab PC.
    ```
    Expected: `LastTaskResult` 0 and a `LastRunTime` within the last day.
 4. Check the heartbeat alert is armed: the blob `heartbeat/labpc-backup` is updated
-   daily and `labpc-backup-heartbeat` is enabled in Azure Monitor. If the SAS expiry
-   is within 60 days, renew it (R1.10 step 3) and update `backup.config.psd1`.
+   daily and `labpc-backup-heartbeat` is enabled in Azure Monitor. If the policy expiry
+   is within 60 days, extend it with `az storage container policy update -c
+   heartbeat -n labpc-heartbeat --expiry <new date> ...` (R1.10 step 3). The SAS
+   URL stays the same, so `backup.config.psd1` needs no change.
 5. Update the issue and `docs/deployment/PRODUCTION_DEPLOYMENT.md` to say the lab PC
    app is retired.

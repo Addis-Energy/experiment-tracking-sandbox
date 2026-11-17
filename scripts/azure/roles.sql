@@ -1,11 +1,16 @@
 -- Azure PG role setup. Run once as the Azure admin, connected to the
 -- maintenance database (postgres), BEFORE creating the experiments DB:
 --
---   psql -v ON_ERROR_STOP=1 -v app_password="$APP_PW" \
---        -v backup_password="$BACKUP_PW" -f scripts/azure/roles.sql
+--   { printf "\\set app_password '%s'\n" "$APP_PW"
+--     printf "\\set backup_password '%s'\n" "$BACKUP_PW"
+--     cat scripts/azure/roles.sql; } | psql -v ON_ERROR_STOP=1 -f -
+--
+-- Passwords go in a \set prelude over stdin, never -v on the command line
+-- (argv is visible in the process list). Supply the admin password via
+-- PGPASSWORD in the environment.
 --
 -- Idempotent: roles that already exist are left untouched (passwords are
--- not reset). Passwords arrive as psql variables, never hard-coded.
+-- not reset). Passwords are never hard-coded.
 --
 -- Roles:
 --   experiments_app    LOGIN   owns the DB and every object (the app drops
