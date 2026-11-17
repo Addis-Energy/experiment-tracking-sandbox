@@ -15,9 +15,10 @@ Conventions:
 
 ```bash
 cp scripts/azure/azure.env.example scripts/azure/azure.env   # untracked; fill it in
-source scripts/azure/azure.env
+source <(tr -d '\r' < scripts/azure/azure.env)   # strip CRs (Windows editors)
 export PGHOST="$PG.postgres.database.azure.com"
 export PGSSLMODE=require
+export AZ_RG="$RG" AZ_PG_SERVER="$PG" PGUSER="$PG_ADMIN_USER"   # used by R5
 az account set --subscription "$SUBSCRIPTION"
 ```
 
@@ -26,6 +27,32 @@ az account set --subscription "$SUBSCRIPTION"
 `/deploy`), and the lab PC must have run `update.ps1`, which pip-installs
 `requirements.txt` including `azure-storage-blob` and `azure-identity`. This does
 not change the lab PC app's behaviour: `PHOTO_STORAGE` defaults to local.
+
+**Prerequisite before merging this branch to `main` or running `update.ps1`: local
+backup password.** `backup.ps1` no longer carries a hard-coded password. It reads
+`pgpass.conf` and runs `pg_dump -w`, so without an entry the nightly backup fails
+(fast, logged as `FAILED`) from the first run after the update. [PS] on the lab PC:
+1. Find the backup task's account:
+   ```powershell
+   (Get-ScheduledTask ExperimentTrackerBackup).Principal.UserId
+   ```
+2. As that account (log in, or `runas /user:<account> powershell`), add this line to
+   `%APPDATA%\postgresql\pgpass.conf` (create the folder and file if missing):
+   ```
+   localhost:5432:experiments:postgres:<local postgres password>
+   ```
+3. Still as that account, run the backup by hand:
+   ```powershell
+   powershell -NoProfile -File C:\path\to\backup.ps1
+   Get-Content C:\Logs\experiment-tracker\backup.log -Tail 5
+   ```
+   Expected: "Backup complete" and "Public copy complete" in
+   `C:\Logs\experiment-tracker\backup.log`.
+   If this fails: "fe_sendauth: no password supplied" means the line is missing or
+   in another account's `%APPDATA%`.
+
+Keep this line after the switch: R3 (rollback) goes back to the local DB and relies
+on it.
 
 Postgres server parameter `log_statement` must stay `none` (the default) whenever
 `roles.sql` or `grant_db_access.sh` runs. Otherwise `CREATE ROLE ... PASSWORD` is
@@ -48,10 +75,56 @@ end of this section.
 
 1. [bash] `bash scripts/azure/provision.sh`. It reads `scripts/azure/azure.env`. The
    Postgres admin password comes from `$PG_ADMIN_PASSWORD` or a hidden prompt.
-2. It prints placeholder `az webapp config appsettings set` lines for `DATABASE_URL`
-   and `FIREBASE_*`. Fill in the real values and run them yourself (they are not
-   saved anywhere). `DATABASE_URL` is `experiments_app` on the Azure host with
-   `sslmode=require`.
+2. It prints a placeholder `az webapp config appsettings set` command for
+   `DATABASE_URL`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`,
+   `FIREBASE_CLIENT_EMAIL`, `FIREBASE_CLIENT_ID` and `FIREBASE_CLIENT_CERT_URL` (the
+   names `backend/config/settings.py` reads). Fill in the real values from the
+   Firebase service-account JSON and run it yourself (they are not saved anywhere).
+   `FIREBASE_PRIVATE_KEY` must be one line with literal `\n` sequences, exactly as
+   in the JSON, not real line breaks. `DATABASE_URL` is `experiments_app` on the
+   Azure host with `sslmode=require`. The `labpc-backup-heartbeat` alert is created
+   disabled; R2 step 6 enables it.
+2b. **GitHub OIDC identity for the deploy workflow.** Do this after plan step P2
+   (the repo is in the Addis org). [bash], with `<org>/<repo>` the real repo path,
+   `gh auth login`ed as a repo admin:
+   ```bash
+   GH_REPO_PATH=<org>/<repo>
+   CLIENT_ID="$(az ad app create --display-name experiment-tracker-deploy \
+     --query appId -o tsv | tr -d '\r')"
+   SP_ID="$(az ad sp create --id "$CLIENT_ID" --query id -o tsv | tr -d '\r')"
+   az ad app federated-credential create --id "$CLIENT_ID" --parameters "{
+     \"name\": \"github-main\",
+     \"issuer\": \"https://token.actions.githubusercontent.com\",
+     \"subject\": \"repo:$GH_REPO_PATH:ref:refs/heads/main\",
+     \"audiences\": [\"api://AzureADTokenExchange\"]}"
+   RG_ID="$(az group show -n "$RG" --query id -o tsv | tr -d '\r')"
+   az role assignment create --role Contributor --scope "$RG_ID" \
+     --assignee-object-id "$SP_ID" --assignee-principal-type ServicePrincipal
+   ```
+   Then the GitHub side. The names must match `.github/workflows/deploy-azure.yml`
+   exactly. `gh secret set NAME` prompts for the value (nothing on the command
+   line):
+   ```bash
+   R=(--repo "$GH_REPO_PATH")
+   printf '%s' "$CLIENT_ID" | gh secret set AZURE_CLIENT_ID "${R[@]}"
+   az account show --query tenantId -o tsv | tr -d '\r\n' |
+     gh secret set AZURE_TENANT_ID "${R[@]}"
+   az account show --query id -o tsv | tr -d '\r\n' |
+     gh secret set AZURE_SUBSCRIPTION_ID "${R[@]}"
+   gh secret set AZURE_DATABASE_URL "${R[@]}"     # experiments_app, sslmode=require
+   for n in API_KEY AUTH_DOMAIN PROJECT_ID STORAGE_BUCKET MESSAGING_SENDER_ID APP_ID
+   do gh secret set "VITE_FIREBASE_$n" "${R[@]}"; done
+   gh variable set AZURE_RG --body "$RG" "${R[@]}"
+   gh variable set AZURE_APP --body "$APP" "${R[@]}"
+   gh variable set AZURE_PG_SERVER --body "$PG" "${R[@]}"
+   gh secret list "${R[@]}"; gh variable list "${R[@]}"
+   ```
+   Expected: 10 secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+   `AZURE_SUBSCRIPTION_ID`, `AZURE_DATABASE_URL`, six `VITE_FIREBASE_*`) and 3
+   variables (`AZURE_RG`, `AZURE_APP`, `AZURE_PG_SERVER`).
+   If this fails: the role assignment can take a few minutes to apply; a login
+   error in the workflow usually means the federated subject does not match the
+   repo path exactly.
 3. Check the firewall:
    ```bash
    az postgres flexible-server firewall-rule list -g "$RG" -n "$PG" -o table
@@ -76,7 +149,7 @@ end of this section.
    shows migrations running and Oryx running `pip install`. Repo secrets
    `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_DATABASE_URL`
    and the six `VITE_FIREBASE_*` must be set, plus repo variables `AZURE_RG`,
-   `AZURE_APP`, `AZURE_PG_SERVER`.
+   `AZURE_APP`, `AZURE_PG_SERVER` (step 2b).
    If this fails: the GitHub federated credential subject must be exactly
    `repo:<org>/<repo>:ref:refs/heads/main` (the repo must already be in the Addis
    org). The very first deploy needs the empty-schema restore below first, so a
@@ -100,7 +173,15 @@ If this fails: check the `postgres` password and that you used the PG 18 `pg_dum
 ### R1.2 Roles, then the database
 
 [bash] The admin runs `roles.sql` with passwords passed through a `\set` prelude on
-stdin (never `-v`, which shows in the process list):
+stdin (never `-v`, which shows in the process list).
+
+Generated passwords must be alphanumeric only: they go inside a psql `\set '...'`
+and into connection URLs, where quotes, `@`, `:`, `/` and `%` break things.
+Generate each one with:
+
+```bash
+openssl rand -base64 32 | tr -dc A-Za-z0-9 | head -c 32; echo
+```
 
 ```bash
 read -rs -p "experiments_app password: " APP_PW; echo
@@ -182,8 +263,9 @@ read access (existing objects plus default privileges for future ones).
    ```bash
    export PHOTO_STORAGE=blob AZURE_STORAGE_ACCOUNT_URL=https://<STORAGE>.blob.core.windows.net
    # DATABASE_URL: set it without echoing it, e.g. read -rs DATABASE_URL; export DATABASE_URL
-   python scripts/verify_migration.py snapshot --out after.json --check-blobs
-   python scripts/verify_migration.py diff before.json after.json
+   .venv/Scripts/python scripts/verify_migration.py snapshot --out after.json \
+     --check-blobs
+   .venv/Scripts/python scripts/verify_migration.py diff before.json after.json
    ```
    Expected: `OK` and exit code 0. The AFTER snapshot's timezone must be
    `America/New_York`.
@@ -198,28 +280,41 @@ read access (existing objects plus default privileges for future ones).
 Run on the lab PC (or whichever machine has the SharePoint photo folder), with
 shell-only env vars (never in a `.env`): `DATABASE_URL` (Azure, `experiments_app`),
 `PHOTO_STORAGE=blob`, `AZURE_STORAGE_ACCOUNT_URL`. Blob auth is `az login` as Mat
-(DefaultAzureCredential).
+(DefaultAzureCredential), so the Azure CLI must be installed on the lab PC first
+(`winget install Microsoft.AzureCLI`, then open a new shell and `az login`).
 
 1. Path mapping. In the dev DB copy, the rows point at
    `C:\Users\LabPC\Addis Energy\All Company - Addis Energy\07_Software\addis_energy_research\uploads\sample_photos\...`
    but the synced files live in
    `...\07_Software\addis_energy_research_prod\sample_photos`. Check the real
    layout on the lab PC first, then pass `--map OLD_PREFIX=NEW_PREFIX`. On the dev
-   copy that mapping moved 226 of 227 rows. Row id=1 pointed at a personal OneDrive
-   (`...\0x_Software\experiment_tracking\uploads\sample_photos\img_6784_720.jpg`)
-   and needs its own `--map` or manual handling.
+   copy that mapping moved 226 of 227 rows.
+1b. Row id=1 points at Mat's personal OneDrive. Copy that one file to the lab PC
+   and map its folder too, so all 227 photos resolve. From Mat's machine, copy
+   `img_6784_720.jpg` from
+   `C:\Users\MathewHearl\OneDrive - Addis Energy\Documents\0x_Software\experiment_tracking\uploads\sample_photos\`
+   into `C:\Backups\experiments\photo_id1\` on the lab PC (via OneDrive/SharePoint
+   or a USB stick). Every run below then takes a second `--map`:
+   `--map "C:\Users\MathewHearl\OneDrive - Addis Energy\Documents\0x_Software\experiment_tracking\uploads\sample_photos=C:\Backups\experiments\photo_id1"`
+   (use the prefix exactly as the dry run prints it for id=1 if it differs).
 2. Set the SharePoint photo folder to "Always keep on this device". A dry run never
    reads bytes, so online-only file errors only appear under `--apply`.
 3. Dry run:
    ```powershell
-   .venv\Scripts\python scripts\migrate_photos_to_blob.py --map "<OLD>=<NEW>"
+   .venv\Scripts\python scripts\migrate_photos_to_blob.py --map "<OLD>=<NEW>" `
+     --map "<ID1_OLD>=C:\Backups\experiments\photo_id1"
    ```
+   The first lines print the target: `database: host=... database=...` and
+   `photo store: blob <account URL> container=sample-photos`. **Check the printed
+   target is Azure before `--apply`** (host ends `.postgres.database.azure.com`).
    Expected: `missing` is empty, or each missing file is listed and you review it
    with Mat. Exit code 1 means something is missing or failed.
 4. Apply:
    ```powershell
-   .venv\Scripts\python scripts\migrate_photos_to_blob.py --apply --map "<OLD>=<NEW>"
+   .venv\Scripts\python scripts\migrate_photos_to_blob.py --apply --map "<OLD>=<NEW>" `
+     --map "<ID1_OLD>=C:\Backups\experiments\photo_id1"
    ```
+   `--apply` refuses (exit 1, nothing written) unless `PHOTO_STORAGE=blob`.
    Expected: every row moved, `missing` empty, exit 0. Blob names are
    `<sample_id>/<stem>_<uuid8><ext>` in the private `sample-photos` container.
    If this fails: online-only files are recorded as "failed" and the run continues.
@@ -296,7 +391,10 @@ default privileges must cover them.
        HeartbeatUrl = 'https://<STORAGE>.blob.core.windows.net/heartbeat/labpc-backup?<sas>'
    }
    ```
-   With the file absent, `backup.ps1` behaves as it does today (local DB).
+   With the file absent, `backup.ps1` dumps the local DB as `postgres` on
+   `localhost`. The password then comes from the `localhost:5432:experiments:postgres`
+   line in the task account's `pgpass.conf` (Section 0 prerequisite); without it the
+   backup fails.
 2. The password comes from the backup task account's
    `%APPDATA%\postgresql\pgpass.conf` (log in as that account, or use `runas`):
    ```
@@ -352,9 +450,35 @@ default privileges must cover them.
 
 ### R1.11 Rollback drill
 
-Run R3 once against the rehearsal data (dump Azure on the lab PC, restore into a
-**scratch** database, not over the real one, during the rehearsal). Expected:
-restores cleanly and the app can point at it. Record the time.
+Practise the R3 dump and restore against the rehearsal data, into a **scratch**
+database. The lab PC's `experiments` database is still the live production DB.
+
+**Do NOT run R3 steps 0, 2 or 3 during the drill**, and never run
+`dropdb experiments` (or `DROP DATABASE experiments`) on the lab PC during the
+rehearsal.
+
+1. Do R3 step 1 (dump Azure to `C:\Backups\experiments\rollback_azure.dump`).
+2. Restore it into a scratch database and time it. [PS] on the lab PC:
+   ```powershell
+   $pg = "C:\Program Files\PostgreSQL\18\bin"
+   Measure-Command {
+     & "$pg\createdb.exe" -h localhost -U postgres rollback_drill
+     & "$pg\pg_restore.exe" --no-owner --no-acl -h localhost -U postgres `
+       -d rollback_drill C:\Backups\experiments\rollback_azure.dump
+   }
+   ```
+   Expected: completes without errors.
+3. Verify counts against Azure:
+   ```powershell
+   & "$pg\psql.exe" -h localhost -U postgres -d rollback_drill `
+     -c "SELECT count(*) FROM experiments;" -c "SELECT count(*) FROM sample_photos;"
+   ```
+   Expected: the same counts as the Azure AFTER snapshot (R1.5).
+4. Drop the scratch database (note the name: `rollback_drill`, not `experiments`):
+   ```powershell
+   & "$pg\dropdb.exe" -h localhost -U postgres rollback_drill
+   ```
+Record the time.
 
 ### R1.11b Data-fix console smoke test (R4)
 
@@ -386,6 +510,7 @@ Paste this table, filled in, into issue #196:
 | Row counts (BEFORE / AFTER) | |
 | `diff` result | OK / problems |
 | Photo rows moved / missing / failed | /  /  |
+| Unresolved photo ids Mat accepts for switch day (R2 step 3), signed off | |
 | Timezone check (stored timestamps equal, UI date same) | |
 | RF5 check | |
 | PITR restore time | |
@@ -435,11 +560,11 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
    - Then empty the target (the rehearsal copy is in `experiments`). [bash] as the
      admin, connected to `postgres`, with `PGPASSWORD` from a `read -rs` as in R1.2:
      ```bash
-     psql -c "DROP DATABASE experiments;" \
+     psql -c "DROP DATABASE experiments WITH (FORCE);" \
           -c "CREATE DATABASE experiments OWNER experiments_app;"
      ```
      Expected: `DROP DATABASE`, `CREATE DATABASE`. (Roles are kept; no need to rerun
-     `roles.sql`.)
+     `roles.sql`. `WITH (FORCE)` ends any leftover session, e.g. a researcher's psql.)
    - Do R1.1 (dump), R1.3 (restore, timed), R1.4 (grants), R1.6 (photo `--apply`,
      timed) and R1.5 (BEFORE and AFTER snapshots, `diff`). The restore resets every
      photo row to its local path, so **all ~227 photos are uploaded again**, not
@@ -448,10 +573,15 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
      `az storage blob delete-batch -s sample-photos --auth-mode login --account-name "$STORAGE"`.
      The BEFORE snapshot runs after the service stopped, so counts must match
      exactly. The AFTER snapshot needs `DATABASE_URL`, `PHOTO_STORAGE=blob` and
-     `AZURE_STORAGE_ACCOUNT_URL` all set (R1.5).
+     `AZURE_STORAGE_ACCOUNT_URL` all set (R1.5). Before the photo `--apply`, check
+     the printed target is Azure (R1.6 step 3), and pass both `--map`s (R1.6 step
+     1b).
    - Start the web app: `az webapp start -g "$RG" -n "$APP"`.
-   Expected: `diff` prints `OK`. If it does not, do not continue: go to R3 and tell
-   the team.
+   Expected: `diff` prints `OK`.
+   One exception: if the only problem `diff` reports is `unresolved photo ids: [...]`
+   and every id listed was reviewed and signed off by Mat in the R1.13 record,
+   continue (no rollback) and fix those photos after the switch. Any other problem,
+   or an id not in that record: do not continue; go to R3 and tell the team.
 4. **Custom domain.** In the portal: App Service, Custom domains, Add custom domain,
    `data.addisenergy.com`, validate, then Add binding with an App Service Managed
    Certificate (SNI SSL). Or:
@@ -470,7 +600,8 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
    Authorized domains. `CORS_ORIGINS` is already `https://data.addisenergy.com`.
 5. **Sign-in check.** From a browser not previously logged in: sign in at
    `https://data.addisenergy.com`, open an experiment, and view recent data.
-   Expected: works, and a photo reference on a sample resolves.
+   Expected: works, and a sample's Photos tab lists its file names (there is no
+   photo display yet).
 6. **Put the backup config in service.** The rehearsal renamed it away (R1.10 step
    6). Now that the diff passed, restore it so tonight's backup dumps Azure
    (and sends the heartbeat). [PS]
@@ -480,6 +611,16 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
    ```
    Expected: the file exists under its real name. Check the log after the first
    night's run (R1.10 step 4).
+   Then arm the heartbeat alert, which `provision.sh` created disabled so it would
+   not fire before the switch. [bash]
+   ```bash
+   az monitor scheduled-query update -g "$RG" -n labpc-backup-heartbeat \
+     --disabled false
+   az monitor scheduled-query show -g "$RG" -n labpc-backup-heartbeat \
+     --query enabled
+   ```
+   Expected: `true`. If tonight's backup does not send a heartbeat, the alert fires
+   within 36 hours.
 7. **Announce** the new URL, and how to request database access (message Mat; R5).
    Nobody has a database login on day one unless they asked beforehand.
 8. **Leave the lab PC service installed but stopped and disabled** (step 2). It is
@@ -496,11 +637,16 @@ Use only before the lab PC app is retired (R6). The lab PC database has everythi
 up to the freeze; Azure may have newer data entered since. This carries it back.
 
 0. **Announce a freeze and stop Azure writes first.** Otherwise data entered during
-   the dump is lost.
+   the dump is lost. Also disable the nightly deploy so it does not run against the
+   stopped app:
    ```bash
    az webapp stop -g "$RG" -n "$APP"
+   gh workflow disable "Deploy to Azure"
+   gh workflow list --all
    ```
-   Expected: the site stops responding.
+   Expected: the site stops responding; "Deploy to Azure" shows
+   `disabled_manually`. Re-enable it (`gh workflow enable "Deploy to Azure"`) only
+   when Azure is brought back into service for a new switch attempt.
 1. **Dump Azure on the lab PC** [PS] (it has PG 18 tools and is allowed through the
    firewall). Use `experiments_backup` credentials (password from `pgpass.conf`):
    ```powershell
@@ -509,10 +655,19 @@ up to the freeze; Azure may have newer data entered since. This carries it back.
      -U experiments_backup -Fc -f C:\Backups\experiments\rollback_azure.dump experiments
    ```
    Expected: exit 0.
-2. **Restore over the local DB.** This replaces the local data, so first copy the
-   latest `experiments_*.sql` backup aside:
+2. **Restore over the local DB.** This replaces the local data, so first take a
+   fresh dump of the local DB. Do not rely on the latest `experiments_*.sql` in
+   `C:\Backups\experiments`: after the switch those are Azure dumps, not the local
+   DB. The `postgres` password comes from the `localhost` line in `pgpass.conf`
+   (Section 0 prerequisite):
    ```powershell
    $pg = "C:\Program Files\PostgreSQL\18\bin"
+   $t = Get-Date -Format yyyyMMdd_HHmmss
+   & "$pg\pg_dump.exe" -h localhost -U postgres -Fc `
+     -f "C:\Backups\experiments\local_before_rollback_$t.dump" experiments
+   ```
+   Expected: exit 0 and a plausible file size. Only then:
+   ```powershell
    & "$pg\dropdb.exe" -h localhost -U postgres experiments
    & "$pg\createdb.exe" -h localhost -U postgres experiments
    & "$pg\pg_restore.exe" --no-owner --no-acl -h localhost -U postgres -d experiments `
@@ -534,7 +689,11 @@ up to the freeze; Azure may have newer data entered since. This carries it back.
    the lab PC app shows no photos until they are migrated back. The photos are not
    lost: they are still in Blob and in the SharePoint folder. Note it in the issue.
    Also rename `backup.config.psd1` away (R1.10 step 6) so the nightly backup dumps
-   the local DB again. No data needs re-entering.
+   the local DB again; it then uses the `localhost:5432:experiments:postgres` line
+   in the task account's `pgpass.conf` (Section 0 prerequisite), so check that line
+   is still there. Disable the heartbeat alert too, since the lab PC stops sending
+   heartbeats: `az monitor scheduled-query update -g "$RG" -n
+   labpc-backup-heartbeat --disabled true`. No data needs re-entering.
 
 ---
 
@@ -654,7 +813,9 @@ rollback path is no longer needed. [PS] as administrator on the lab PC.
    & "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -h localhost -c "\password postgres"
    ```
    Expected: prompts twice for the new password; store it in the password manager.
-   Nothing on the lab PC needs the local DB any more.
+   Nothing on the lab PC needs the local DB any more, so delete the
+   `localhost:5432:experiments:postgres` line from the backup task account's
+   `pgpass.conf` (Section 0 prerequisite) rather than updating it.
 3. **Keep `ExperimentTrackerBackup` running**, now against Azure (R1.10). It must run
    under an account whose password isn't rotated; a scheduled task stops silently
    when its account's password changes. Check:
