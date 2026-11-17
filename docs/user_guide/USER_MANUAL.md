@@ -1,6 +1,8 @@
 # User Manual
 
-The Experiment Tracking System is a web application for the Addis Energy geochemistry team to log and manage lab experiments, track samples and chemicals, upload bulk analytical data, and monitor reactor status. It runs on the lab PC and is accessible from any browser on the local network.
+The Experiment Tracking System is a web application for the Addis Energy geochemistry team to log and manage lab experiments, track samples and chemicals, upload bulk analytical data, and monitor reactor status. It runs on Azure and is accessible from any browser at `https://data.addisenergy.com`.
+
+> Until the switch on 2026-12-03, use the lab PC address over Tailscale as before.
 
 For detailed guides on specific features, see the sub-guides linked in the navigation below.
 
@@ -15,7 +17,7 @@ For detailed guides on specific features, see the sub-guides linked in the navig
 
 ## Getting Started
 
-1. Open a browser and navigate to `https://data.addisenergy.com`
+1. Open a browser and navigate to `https://data.addisenergy.com` (until 2026-12-03, use the lab PC address over Tailscale)
 2. Log in with your `@addisenergy.com` Google or email account.
 3. If you do not have an account, click **Register** and fill in your details. Your account must be approved by an administrator before you can log in. Contact the lab admin after registering.
 
@@ -131,4 +133,4 @@ Experiments move through a defined lifecycle from creation to completion:
 | Export several experiments to one Excel workbook | **Data Export** → set filters (for example an Additive or a Researcher; the **Experiment start date** card filters by when the run began and the **Last sample date** card by the date of its most recent dated result, each with **Begin** and **End** (inclusive calendar days in lab time; leave either blank for an open range). **Last 7 days**, **Last 30 days**, **This month** and **Last month** under Last sample date fill both bounds in one click, so "which experiments have data from last month" is one click on **Last month**. **Clear** resets a card. The list shows a **Start date** and a **Last sample** column; a row standing for several vials shows its latest vial's sample date) → tick the experiments (**Select all shown** ticks every row listed; ticks survive changing the filters) → leave **Include whole series** on to bring each experiment's whole series, or untick it for just the ticked ones and their timepoint vials → **Export**. The page lists up to 500 matches; narrow the filters if it says "Showing N of M". There is no limit on how many experiments an export holds; it is refused only if a tab would have more rows than an Excel sheet allows (about a million). The workbook has the same tabs as **Export all**, including **XRD** (one row per experiment and day, one column per mineral in %, with Rwp) and **Rock XRD** (one row per analysis of a starting-rock sample, with the experiments that use it under **Used by**) when there is XRD to show |
 | Attach an external analysis file | Open an experiment → **XRD** tab → Add Analysis |
 | Search for a sample | Navigate to **Samples**, use the search bar |
-| Add a new user (admin only) | Run `python scripts/manage_users.py create <email> <password> <display_name>` from the App Service SSH console (`docs/deployment/AZURE_RUNBOOK.md` R4), then `approve <request_id>` |
+| Add a new user (admin only) | Run `python scripts/manage_users.py create <email> <password> <display_name>` from the App Service SSH console (`docs/deployment/AZURE_RUNBOOK.md` R4), then `approve <request_id>`. Until the switch on 2026-12-03, run it on the lab PC as before |

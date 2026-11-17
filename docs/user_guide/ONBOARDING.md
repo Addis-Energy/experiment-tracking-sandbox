@@ -14,13 +14,13 @@ Welcome to the Experiment Tracking System. This guide covers how to access the w
 
 ### Accessing the app
 
-The Experiment Tracking System runs on Azure and is available from any network. Open your browser and navigate to:
+From 2026-12-03 the app runs on Azure and is available from any network; until then use the lab PC address over Tailscale as before. Open your browser and navigate to:
 
 ```
 https://data.addisenergy.com
 ```
 
-> **Note:** Until the switch on 2026-12-03 the app still runs on the lab PC; your lab administrator will confirm the address to use until then.
+> **Note:** Before the switch this address does not exist yet; your lab administrator will confirm the lab PC address to use until then.
 
 ### Creating an account
 
@@ -42,7 +42,7 @@ If you see a "pending approval" message, your account has not yet been approved.
 | Problem | What to check |
 |---------|---------------|
 | Page does not load | Check your internet connection and that the address is exactly `https://data.addisenergy.com`. |
-| "Service unavailable" or error page | The app may be restarting after the nightly 02:00 update. Wait a minute and retry; if it persists, ask the administrator to check `https://data.addisenergy.com/health`. |
+| "Service unavailable" or error page | The app may be restarting after the nightly 02:00 update. Wait a minute and retry; if it persists, ask the administrator to check `https://data.addisenergy.com/health`. Before 2026-12-03, check that Tailscale is connected and use the lab PC address instead. |
 | "Pending approval" after registering | Your account needs admin approval. Reach out to the lab admin. |
 | Forgotten password | Contact the lab admin to reset your password via the management CLI. |
 
@@ -50,7 +50,7 @@ If you see a "pending approval" message, your account has not yet been approved.
 
 ## Part 2: Direct database access (optional, read-only)
 
-Power BI is no longer used. If you want to query the reporting views directly
+Available after the switch on 2026-12-03. Power BI is no longer used. If you want to query the reporting views directly
 (psql, Python, DBeaver), ask your lab administrator for a personal read-only
 login. Access is by request: give them your current public IP address (search
 "what is my IP"); they add a firewall rule for it and send you a connection
