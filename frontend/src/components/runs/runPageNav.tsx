@@ -1,8 +1,9 @@
 import { Fragment, useEffect } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { SegmentLink } from './SegmentLink'
 import type { RunWrites } from './runWrites'
+import { runViewSearch } from './runView'
 
 /** Experiment IDs as links, comma separated (issue #158). */
 export function SegmentIdList({
@@ -50,17 +51,23 @@ export function RunNotFound({ kind, requestedId, writes, listLabel }: RunNotFoun
 
 /** The API resolves a segment or variant ID to its run (issue #158). When the URL
  *  held one, replace it with the run's base ID so each run has one address and
- *  one cache entry; the loaded run is copied to that entry to skip a refetch. */
+ *  one cache entry; the loaded run is copied to that entry to skip a refetch.
+ *  The query string is kept, and the requested segment is selected unless the
+ *  URL already named one. */
 export function useCanonicalRunUrl(
   requestedId: string,
-  run: { base_id: string } | undefined,
+  run: { base_id: string; segments: { experiment_id: string }[] } | undefined,
   writes: RunWrites,
 ): void {
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const { search } = useLocation()
   useEffect(() => {
     if (!run || run.base_id === requestedId) return
     qc.setQueryData(writes.runQueryKey(run.base_id), run)
-    navigate(writes.runPath(run.base_id), { replace: true })
-  }, [run, requestedId, writes, navigate, qc])
+    const params = new URLSearchParams(search)
+    const select = !params.has('segment') && run.segments.some((s) => s.experiment_id === requestedId)
+    const query = select ? runViewSearch(params, { segmentId: requestedId }) : search
+    navigate(`${writes.runPath(run.base_id)}${query}`, { replace: true })
+  }, [run, requestedId, writes, navigate, qc, search])
 }

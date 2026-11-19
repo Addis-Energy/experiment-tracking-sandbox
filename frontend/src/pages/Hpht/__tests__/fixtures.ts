@@ -1,4 +1,5 @@
 import type { HphtRun, HphtSample } from '@/api/hpht'
+import type { ExperimentDetail } from '@/api/experiments'
 import type { RunSegment } from '@/api/runs'
 
 export const segment = (over: Partial<RunSegment>): RunSegment => ({
@@ -118,4 +119,46 @@ export const RUN: HphtRun = {
       notes: [{ id: 2, note_type: 'modification', note_text: 'Topped up brine', created_by: null }],
     }),
   ],
+}
+
+const nonVariant = (r: HphtRun) => r.samples.filter((x) => !x.is_variant)
+/** Non-variant samples on RUN: what the Samples table shows for the whole run. */
+export const MAIN_SAMPLE_COUNT = nonVariant(RUN).length
+/** ... and those on the HPHT_297-2 segment. */
+export const SEGMENT_2_SAMPLE_COUNT = nonVariant(RUN).filter((x) => x.experiment_id === 'HPHT_297-2').length
+
+/** A run with one segment (no picker, no Segments section). */
+export const SINGLE_RUN: HphtRun = {
+  base_id: 'HPHT_304',
+  warnings: [],
+  conditions: { ...RUN.conditions!, experiment_id: 'HPHT_304', conditions_id: 5 },
+  segments: [segment({ id: 5, experiment_id: 'HPHT_304', status: 'ONGOING', conditions_id: 5 })],
+  samples: [
+    sample({ result_id: 40, experiment_id: 'HPHT_304', run_base_id: 'HPHT_304', experiment_fk: 5 }),
+  ],
+}
+
+/** Detail of HPHT_297-2 with four notes (the Notes tab count). */
+export const SEG_2_DETAIL: ExperimentDetail = {
+  id: 2,
+  experiment_id: 'HPHT_297-2',
+  experiment_number: 297,
+  status: 'ONGOING',
+  researcher: null,
+  date: '2026-09-10T00:00:00',
+  sample_id: null,
+  base_experiment_id: 'HPHT_297',
+  parent_experiment_fk: 1,
+  replicate_label: null,
+  is_outlier: false,
+  id_timepoint_days: null,
+  created_at: '2026-09-10T00:00:00Z',
+  updated_at: null,
+  conditions: null,
+  notes: [1, 2, 3, 4].map((id) => ({
+    id, experiment_id: 'HPHT_297-2', note_type: 'observation', note_text: `note ${id}`,
+    result_id: null, created_by: null, needs_review: false,
+    created_at: '2026-09-11T00:00:00Z', updated_at: null,
+  })),
+  modifications: [],
 }
