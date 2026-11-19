@@ -2,14 +2,13 @@ import { useMemo } from 'react'
 import {
   CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
-import type { HphtSample } from '@/api/hpht'
 import { chartColors } from '@/assets/brand'
 import { markerLabels, type ChartMarker } from '@/components/icp/icpSeries'
 import { fmt } from '@/components/results/sampleFields'
-import { chartMarkers, chartPoints, hasH2, type HphtPoint } from './hphtSeries'
+import { chartMarkers, chartPoints, hasFeYield, hasH2, type H2Point, type H2Sample } from './h2Series'
 
 interface ChartSpec {
-  key: keyof Omit<HphtPoint, 'day'>
+  key: keyof Omit<H2Point, 'day'>
   title: string
   unit: string
   color: string
@@ -28,7 +27,7 @@ const TICK = { fill: chartColors.label, fontSize: 11 }
 
 function RunChart({
   spec, points, markers,
-}: { spec: ChartSpec; points: HphtPoint[]; markers: ChartMarker[] }) {
+}: { spec: ChartSpec; points: H2Point[]; markers: ChartMarker[] }) {
   const labels = useMemo(() => markerLabels(markers, points.map((p) => p.day)), [markers, points])
   return (
     <figure className="space-y-2" aria-label={spec.title}>
@@ -81,15 +80,19 @@ function RunChart({
 }
 
 /** The run's cumulative H₂, H₂ rate and Fe²⁺ yield against cumulative day. Variants are excluded. */
-export function HphtCharts({ samples }: { samples: HphtSample[] }) {
+export function H2Charts({ samples }: { samples: H2Sample[] }) {
   const points = useMemo(() => chartPoints(samples), [samples])
   const markers = useMemo(() => chartMarkers(samples), [samples])
+  const charts = useMemo(
+    () => (hasFeYield(points) ? CHARTS : CHARTS.filter((c) => c.key !== 'cumFe')),
+    [points],
+  )
   if (!hasH2(samples)) {
     return <p className="text-sm text-ink-muted py-6 text-center">No H₂ measurements on this run yet.</p>
   }
   return (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-      {CHARTS.map((spec) => (
+    <div className={`grid grid-cols-1 gap-6 ${charts.length === 3 ? 'xl:grid-cols-3' : 'xl:grid-cols-2'}`}>
+      {charts.map((spec) => (
         <RunChart key={spec.key} spec={spec} points={points} markers={markers} />
       ))}
     </div>

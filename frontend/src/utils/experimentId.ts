@@ -61,3 +61,21 @@ export function runPathFor(experimentType: unknown, baseId: string | null | unde
   if (!list || !baseId) return null
   return `${list}/${encodeURIComponent(baseId)}`
 }
+
+/** Where an experiment lives: its run page (selecting the experiment's segment)
+ *  for HPHT and Core Flood with a base ID, else the experiment page. `tab` is
+ *  appended as `?tab=` / `&tab=`. */
+export function experimentHomePath(
+  experimentType: unknown,
+  experimentId: string,
+  baseId: string | null | undefined,
+  tab?: string,
+): string {
+  const params = new URLSearchParams()
+  const run = runPathFor(experimentType, baseId)
+  if (run) params.set('segment', experimentId)
+  if (tab) params.set('tab', tab)
+  const query = params.toString()
+  const path = run ?? `/experiments/${encodeURIComponent(experimentId)}`
+  return query ? `${path}?${query}` : path
+}

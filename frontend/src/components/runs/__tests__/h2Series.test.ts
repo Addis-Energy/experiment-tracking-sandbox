@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { chartMarkers, chartPoints, hasH2 } from '../hphtSeries'
-import { RUN, sample } from './fixtures'
+import { chartMarkers, chartPoints, hasFeYield, hasH2 } from '../h2Series'
+import { RUN, sample } from '@/pages/Hpht/__tests__/fixtures'
 
 describe('HPHT chart series (issue #150)', () => {
   it('excludes variants from the cumulative series', () => {
@@ -36,5 +36,18 @@ describe('HPHT chart series (issue #150)', () => {
       sample({ h2_grams_per_ton_yield: null }),
       sample({ result_id: 2, is_variant: true, h2_grams_per_ton_yield: 5 }),
     ])).toBe(false)
+  })
+
+  it('maps a sample without an Fe yield field to cumFe null', () => {
+    const cf = {
+      result_id: 1, experiment_id: 'CF_027', is_variant: false, cumulative_time_post_reaction_days: 3,
+      h2_grams_per_ton_yield: 1, cumulative_h2_grams_per_ton: 4, h2_grams_per_ton_per_day: 0.5,
+    }
+    expect(chartPoints([cf])).toEqual([{ day: 3, cumH2: 4, rate: 0.5, cumFe: null }])
+  })
+
+  it('hasFeYield is false when no point carries one, true otherwise', () => {
+    expect(hasFeYield([{ day: 1, cumH2: 1, rate: 1, cumFe: null }])).toBe(false)
+    expect(hasFeYield([{ day: 1, cumH2: 1, rate: 1, cumFe: 0.2 }])).toBe(true)
   })
 })

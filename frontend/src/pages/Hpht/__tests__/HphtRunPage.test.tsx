@@ -4,9 +4,10 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation, useNavigationType } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { HphtRun } from '@/api/hpht'
+import type { ConditionsResponse } from '@/api/conditions'
 import type { ResultWithFlags } from '@/api/experiments'
 import { ToastProvider } from '@/components/ui'
-import { RUN, segment } from './fixtures'
+import { MAIN_SAMPLE_COUNT, RUN, SEG_2_DETAIL, SEGMENT_2_SAMPLE_COUNT, SINGLE_RUN, segment } from './fixtures'
 
 vi.mock('@/api/hpht', () => ({ hphtApi: { list: vi.fn(), get: vi.fn(), icp: vi.fn() } }))
 vi.mock('@/api/experiments', () => ({
@@ -21,14 +22,18 @@ vi.mock('@/api/experiments', () => ({
     patchNote: vi.fn(),
     addNote: vi.fn(),
     exportAll: vi.fn(),
+    getDeleteImpact: vi.fn(),
+    delete: vi.fn(),
   },
 }))
+vi.mock('@/api/conditions', () => ({ conditionsApi: { getByExperiment: vi.fn() } }))
 vi.mock('@/api/chemicals', () => ({ chemicalsApi: { listExperimentAdditives: vi.fn() } }))
 vi.mock('@/api/results', () => ({ resultsApi: { getScalar: vi.fn() } }))
 
 import { hphtApi } from '@/api/hpht'
 import { experimentsApi } from '@/api/experiments'
 import { chemicalsApi } from '@/api/chemicals'
+import { conditionsApi } from '@/api/conditions'
 import { resultsApi } from '@/api/results'
 import { HphtRunPage } from '../HphtRunPage'
 
@@ -65,16 +70,32 @@ function result(id: number, day: number): ResultWithFlags {
 }
 
 function Probe() {
+  const { pathname, search } = useLocation()
   return (
     <>
-      <div data-testid="path">{useLocation().pathname}</div>
+      <div data-testid="path">{pathname}</div>
+      <div data-testid="location">{pathname + search}</div>
       <div data-testid="nav-type">{useNavigationType()}</div>
     </>
   )
 }
 
+const detailOf = (id: string) =>
+  id === 'HPHT_297-2' ? SEG_2_DETAIL : { ...SEG_2_DETAIL, experiment_id: id, notes: [] }
+
+const conditionsOf = (id: string): ConditionsResponse => ({
+  id: 1, experiment_fk: 1, experiment_id: id, experiment_type: 'HPHT', reactor_number: 7,
+  reactor_slot: 'R07', created_at: '2026-09-01T00:00:00',
+})
+
+function mockSegmentQueries() {
+  vi.mocked(experimentsApi.get).mockImplementation(async (id: string) => detailOf(id))
+  vi.mocked(conditionsApi.getByExperiment).mockImplementation(async (id: string) => conditionsOf(id))
+}
+
 function renderPage(run: HphtRun = RUN, path = `/hpht/${run.base_id}`) {
   vi.mocked(hphtApi.get).mockResolvedValue(run)
+  mockSegmentQueries()
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <MemoryRouter initialEntries={[path]}>
@@ -82,6 +103,7 @@ function renderPage(run: HphtRun = RUN, path = `/hpht/${run.base_id}`) {
         <ToastProvider>
           <Routes>
             <Route path="/hpht/:baseId" element={<HphtRunPage />} />
+            <Route path="/hpht" element={<p>HPHT list</p>} />
           </Routes>
           <Probe />
         </ToastProvider>
@@ -89,6 +111,8 @@ function renderPage(run: HphtRun = RUN, path = `/hpht/${run.base_id}`) {
     </MemoryRouter>,
   )
 }
+
+const currentLocation = () => screen.getByTestId('location').textContent ?? ''
 
 const samplesRegion = async () =>
   (await screen.findByRole('heading', { name: 'Samples' })).closest('section') as HTMLElement
@@ -107,21 +131,22 @@ describe('HphtRunPage (issue #150)', () => {
   it('renders the header, reactor and conditions', async () => {
     renderPage()
     expect(await screen.findByRole('heading', { name: 'HPHT_297', level: 1 })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'HPHT_297-2', level: 2 })).toBeInTheDocument()
     expect(screen.getByText('Reactor R07')).toBeInTheDocument()
     const badge = screen.getByText(/^Ongoing:/)
     expect(badge).toHaveTextContent('Ongoing: HPHT_297-2')
     expect(within(badge).getByRole('link', { name: 'HPHT_297-2' })).toHaveAttribute(
-      'href', '/experiments/HPHT_297-2',
+      'href', '/hpht/HPHT_297?segment=HPHT_297-2',
     )
     expect(screen.getByText('1500 psi')).toBeInTheDocument()
-    // Issue #162: explicit, in case the detail page's default tab ever changes.
-    expect(screen.getByRole('link', { name: 'Edit on Conditions tab' })).toHaveAttribute(
-      'href', '/experiments/HPHT_297-2?tab=conditions',
+    // The card edits in place: the Conditions tab with the card's segment selected.
+    expect(screen.getByRole('link', { name: 'Edit conditions' })).toHaveAttribute(
+      'href', '/hpht/HPHT_297?segment=HPHT_297-2&tab=conditions',
     )
     // The segment the card describes is a link too, not caption text (epic #154).
     const heading = screen.getByRole('heading', { name: /^Conditions/, level: 2 })
     expect(within(heading).getByRole('link', { name: 'HPHT_297-2' })).toHaveAttribute(
-      'href', '/experiments/HPHT_297-2',
+      'href', '/hpht/HPHT_297?segment=HPHT_297-2&tab=conditions',
     )
   })
 
@@ -251,19 +276,20 @@ describe('HphtRunPage links (issue #158)', () => {
     expect(seg).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('region', { name: 'Segments' })).toBeInTheDocument()
     const hrefs = within(seg.parentElement!).getAllByRole('link').map((a) => a.getAttribute('href'))
-    expect(hrefs).toEqual(RUN.segments.map((s) => `/experiments/${s.experiment_id}`))
+    expect(hrefs).toEqual(RUN.segments.map((s) => `/hpht/HPHT_297?segment=${s.experiment_id}`))
   })
 
-  it('keeps Segments closed for a single-segment run', async () => {
+  it('has no Segments section for a single-segment run', async () => {
     renderPage({ ...RUN, segments: [RUN.segments[0]] })
-    expect(await screen.findByRole('button', { name: /^Segments/ })).toHaveAttribute('aria-expanded', 'false')
+    await screen.findByRole('heading', { name: 'Samples' })
+    expect(screen.queryByRole('button', { name: /^Segments/ })).not.toBeInTheDocument()
   })
 
   it('links the Segment column without opening the sample editor', async () => {
     renderPage()
     const region = await samplesRegion()
     const link = within(region).getAllByRole('link', { name: 'HPHT_297-2' })[0]
-    expect(link).toHaveAttribute('href', '/experiments/HPHT_297-2')
+    expect(link).toHaveAttribute('href', '/hpht/HPHT_297?segment=HPHT_297-2')
     await userEvent.click(link)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
@@ -272,6 +298,235 @@ describe('HphtRunPage links (issue #158)', () => {
     renderPage(RUN, '/hpht/HPHT_297-2')
     await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent(/^\/hpht\/HPHT_297$/))
     expect(screen.getByTestId('nav-type')).toHaveTextContent('REPLACE')
+    expect(currentLocation()).toBe('/hpht/HPHT_297?segment=HPHT_297-2')
     expect(await screen.findByRole('heading', { name: 'HPHT_297', level: 1 })).toBeInTheDocument()
+  })
+})
+
+/** The run a path asks for: a segment or variant ID resolves to its run, as the API does. */
+function runFor(id: string): HphtRun {
+  if (id === SINGLE_RUN.base_id) return SINGLE_RUN
+  if (id === RUN.base_id || RUN.segments.some((s) => s.experiment_id === id)) return RUN
+  return { ...SINGLE_RUN, base_id: id, segments: [segment({ id: 9, experiment_id: id })], samples: [] }
+}
+
+/** Mounts the page at `path` and waits for the segment's record header. */
+async function renderRun(path: string) {
+  const base = decodeURIComponent(path.split('?')[0].split('/')[2])
+  vi.mocked(hphtApi.icp).mockResolvedValue([
+    { result_id: 12, experiment_id: 'HPHT_297-2', is_variant: false, sample_date: null,
+      cumulative_time_post_reaction_days: 8, elements: { fe: 4.5 } },
+  ] as never)
+  renderPage(runFor(base), path)
+  vi.mocked(hphtApi.get).mockImplementation(async (id: string) => runFor(id))
+  await waitFor(() => expect(document.getElementById('record-header')).not.toBeNull())
+}
+
+async function deleteViaModal(id: string) {
+  vi.mocked(experimentsApi.getDeleteImpact).mockResolvedValue({
+    experiment_id: id, conditions: 1, results: 0, scalar_results: 0, icp_results: 0, result_files: 0,
+    notes: 0, additives: 0, external_analyses: 0, xrd_phases: 0, total: 1,
+    background_for: [], h2_background_for: [], replicate_children: [],
+  })
+  vi.mocked(experimentsApi.delete).mockResolvedValue({} as never)
+  await userEvent.click(screen.getByRole('button', { name: /delete experiment/i }))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.type(await within(dialog).findByLabelText(/type the experiment id/i), id)
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+}
+
+async function renameTo(newId: string) {
+  vi.mocked(experimentsApi.checkExists).mockResolvedValue({ exists: false })
+  await userEvent.click(screen.getByRole('button', { name: /rename experiment/i }))
+  const input = screen.getByRole('textbox')
+  await userEvent.clear(input)
+  await userEvent.type(input, newId)
+  const save = screen.getByRole('button', { name: 'Save' })
+  await waitFor(() => expect(save).toBeEnabled())
+  await userEvent.click(save)
+}
+
+describe('one page per run', () => {
+  beforeEach(() => {
+    vi.mocked(hphtApi.get).mockReset()
+    vi.mocked(hphtApi.icp).mockReset()
+    vi.mocked(experimentsApi.getResults).mockReset()
+    vi.mocked(experimentsApi.getResults).mockResolvedValue([])
+    vi.mocked(experimentsApi.get).mockClear()
+    vi.mocked(experimentsApi.patch).mockReset()
+    vi.mocked(chemicalsApi.listExperimentAdditives).mockResolvedValue([])
+  })
+
+  it('single-segment run: no picker, no Segments section, record header at h1', async () => {
+    await renderRun('/hpht/HPHT_304')
+    expect(screen.queryByRole('navigation', { name: 'Segments' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /segments/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'HPHT_304' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /rename experiment/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /delete experiment/i })).toBeInTheDocument()
+  })
+
+  it('multi-segment run: picker, run heading at h1, selected segment header at h2', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2')
+    expect(screen.getByRole('navigation', { name: 'Segments' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'HPHT_297' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 2, name: 'HPHT_297-2' })).toBeInTheDocument()
+  })
+
+  it('marks the selected segment rows and shows the whole run', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2')
+    const rows = screen.getAllByTestId(/^sample-/)
+    expect(rows.length).toBe(MAIN_SAMPLE_COUNT)
+    expect(rows.filter((r) => r.dataset.marked === 'true').length).toBe(SEGMENT_2_SAMPLE_COUNT)
+  })
+
+  it('only=1 narrows the table to the segment', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2&only=1')
+    expect(screen.getAllByTestId(/^sample-/).length).toBe(SEGMENT_2_SAMPLE_COUNT)
+  })
+
+  it('no rows are marked when the run is opened without a segment', async () => {
+    await renderRun('/hpht/HPHT_297')
+    expect(screen.getAllByTestId(/^sample-/).some((r) => r.dataset.marked === 'true')).toBe(false)
+  })
+
+  it('titles the charts H₂ over time and opens ICP over time', async () => {
+    await renderRun('/hpht/HPHT_297')
+    expect(screen.getByRole('heading', { name: /H₂ over time/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /ICP over time/i })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('the notes tab shows the selected segment notes, not the samples', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2&tab=notes')
+    await waitFor(() => expect(experimentsApi.get).toHaveBeenCalledWith('HPHT_297-2'))
+    expect(screen.queryByRole('heading', { name: 'Samples' })).not.toBeInTheDocument()
+    expect(await screen.findByText('note 1')).toBeInTheDocument()
+  })
+
+  it('a segment ID in the path keeps the query and selects that segment (Review Focus 3)', async () => {
+    await renderRun('/hpht/HPHT_297-2?tab=notes')
+    await waitFor(() => expect(currentLocation()).toBe('/hpht/HPHT_297?segment=HPHT_297-2&tab=notes'))
+  })
+
+  it('deleting the selected segment of a two-segment run stays on the run (Review Focus 4)', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2')
+    await deleteViaModal('HPHT_297-2')
+    await waitFor(() => expect(currentLocation()).toBe('/hpht/HPHT_297'))
+  })
+
+  it('never points at the deleted segment while the run refetches', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2')
+    // Hold the post-delete run back, so the page lives on the cached run.
+    let release: (run: HphtRun) => void = () => {}
+    vi.mocked(hphtApi.get).mockImplementation(() => new Promise<HphtRun>((r) => { release = r }))
+    vi.mocked(experimentsApi.get).mockClear()
+    await deleteViaModal('HPHT_297-2')
+    await waitFor(() => expect(currentLocation()).toBe('/hpht/HPHT_297'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await new Promise((r) => setTimeout(r, 20)) // the header's deferred cache eviction
+
+    expect(screen.queryByRole('link', { name: 'HPHT_297-2' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('sample-12')).not.toBeInTheDocument()
+    expect(experimentsApi.get).not.toHaveBeenCalledWith('HPHT_297-2')
+
+    const remaining: HphtRun = {
+      ...RUN,
+      segments: [RUN.segments[0]],
+      samples: RUN.samples.filter((x) => x.experiment_id === 'HPHT_297'),
+    }
+    release(remaining)
+    // The picker goes once the refetched run has a single segment left.
+    await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Segments' })).not.toBeInTheDocument())
+    expect(screen.getByRole('heading', { level: 1, name: 'HPHT_297' })).toBeInTheDocument()
+    expect(experimentsApi.get).not.toHaveBeenCalledWith('HPHT_297-2')
+  })
+
+  it('deleting the only segment goes to the HPHT list', async () => {
+    await renderRun('/hpht/HPHT_304')
+    await deleteViaModal('HPHT_304')
+    await waitFor(() => expect(currentLocation()).toBe('/hpht'))
+  })
+
+  it('renaming the selected segment follows it to its new home', async () => {
+    vi.mocked(experimentsApi.patch).mockResolvedValue({
+      ...SEG_2_DETAIL, experiment_id: 'HPHT_400', base_experiment_id: 'HPHT_400',
+    })
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2')
+    await renameTo('HPHT_400')
+    await waitFor(() => expect(currentLocation()).toBe('/hpht/HPHT_400?segment=HPHT_400'))
+  })
+})
+
+describe('final review fixes', () => {
+  beforeEach(() => {
+    vi.mocked(hphtApi.get).mockReset()
+    vi.mocked(hphtApi.icp).mockReset()
+    vi.mocked(experimentsApi.getResults).mockReset()
+    vi.mocked(experimentsApi.getResults).mockResolvedValue([])
+    vi.mocked(experimentsApi.get).mockClear()
+    vi.mocked(chemicalsApi.listExperimentAdditives).mockResolvedValue([])
+    vi.mocked(resultsApi.getScalar).mockReset()
+  })
+
+  it('F1: an open header editor closes when another segment is picked', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2')
+    const picker = screen.getByRole('navigation', { name: 'Segments' })
+    // Visit the root first, so the -2 segment is cached and the header never unmounts.
+    await userEvent.click(within(picker).getByRole('link', { name: 'HPHT_297' }))
+    await screen.findByRole('heading', { level: 2, name: 'HPHT_297' })
+    await userEvent.click(screen.getByTitle('Edit start date'))
+    expect(screen.getByRole('button', { name: 'Save date' })).toBeInTheDocument()
+
+    await userEvent.click(within(picker).getByRole('link', { name: 'HPHT_297-2' }))
+    await screen.findByRole('heading', { level: 2, name: 'HPHT_297-2' })
+    expect(screen.queryByRole('button', { name: 'Save date' })).not.toBeInTheDocument()
+  })
+
+  it('F2: data checks on a single-segment run point at the header, not Segments', async () => {
+    renderPage({
+      ...SINGLE_RUN,
+      warnings: [
+        { code: 'missing_description', experiment_ids: ['HPHT_304'] },
+        { code: 'base_mismatch', experiment_ids: ['HPHT_304'] },
+      ],
+    })
+    await userEvent.click(await screen.findByRole('button', { name: /^Data checks/ }))
+    const missing = screen.getByTestId('warning-missing_description')
+    expect(missing).toHaveTextContent('No description on HPHT_304. Add one under the ID above.')
+    expect(missing).not.toHaveTextContent(/Segments/)
+    const mismatch = screen.getByTestId('warning-base_mismatch')
+    expect(mismatch).toHaveTextContent(/Rename it with the pencil beside the ID above\.$/)
+    expect(mismatch).not.toHaveTextContent(/Segments/)
+  })
+
+  it('F2: data checks on a multi-segment run still point at Segments', async () => {
+    renderPage({ ...RUN, warnings: [{ code: 'missing_description', experiment_ids: ['HPHT_297-2'] }] })
+    await userEvent.click(await screen.findByRole('button', { name: /^Data checks/ }))
+    expect(screen.getByTestId('warning-missing_description')).toHaveTextContent('Add one in Segments.')
+  })
+
+  it('F3: a selected side sample is marked in Side samples, and only=1 is ignored', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2_Desorption&only=1')
+    const main = await samplesRegion()
+    const mainRows = within(main).getAllByTestId(/^sample-/)
+    expect(mainRows.length).toBe(MAIN_SAMPLE_COUNT)
+    expect(mainRows.some((r) => r.dataset.marked === 'true')).toBe(false)
+    expect(screen.getByRole('button', { name: /^Side samples/ })).toHaveAttribute('aria-expanded', 'true')
+    const side = screen.getByRole('region', { name: 'Side samples' })
+    expect(within(side).getByTestId('sample-13')).toHaveAttribute('data-marked', 'true')
+    expect(screen.queryByRole('link', { name: /only this segment/i })).not.toBeInTheDocument()
+  })
+
+  it('F9: DETAILS on a run page sample loads its DO and Fe(II)', async () => {
+    vi.mocked(resultsApi.getScalar).mockResolvedValue({
+      id: 1, result_id: 11, final_dissolved_oxygen_mg_L: 3.2, ferrous_iron_yield: null,
+    } as never)
+    await renderRun('/hpht/HPHT_297')
+    const row = within(await samplesRegion()).getByTestId('sample-11')
+    expect(resultsApi.getScalar).not.toHaveBeenCalled()
+    await userEvent.click(within(row).getByRole('button', { name: /^Show details for/ }))
+    await waitFor(() => expect(resultsApi.getScalar).toHaveBeenCalledWith(11))
+    expect(await screen.findByText('DO:')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })

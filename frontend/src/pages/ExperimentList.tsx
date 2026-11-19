@@ -1,8 +1,8 @@
-import { Fragment, useState, type ReactNode } from 'react'
+import { Fragment, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import { experimentsApi, type ExperimentListItem, type ExperimentStatus } from '@/api/experiments'
-import { runPathFor } from '@/utils/experimentId'
+import { experimentHomePath } from '@/utils/experimentId'
 import { reactorFilterParam } from '@/utils/reactorSlots'
 import {
   Table, TableHead, TableBody, TableRow, Th, Td,
@@ -239,47 +239,19 @@ export function ExperimentListPage() {
               ) : (
                 data.items.map((exp) => {
                   const hasReplicates = !!exp.replicates?.length
-                  const vialCount = exp.vial_count ?? 1
                   const expanded = expandedGroups.has(exp.id)
                   return (
                     <Fragment key={exp.id}>
                       <ExperimentRow
                         exp={exp}
-                        groupBadge={
-                          hasReplicates ? (
-                            <button
-                              aria-label="Expand replicates"
-                              title="Show replicates here"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                setExpandedGroups((prev) => {
-                                  const next = new Set(prev)
-                                  if (next.has(exp.id)) next.delete(exp.id)
-                                  else next.add(exp.id)
-                                  return next
-                                })
-                              }}
-                              className="ml-2 inline-flex items-center gap-1 rounded bg-surface-raised px-1.5 py-0.5 text-2xs text-ink-secondary hover:text-ink-primary"
-                            >
-                              <span className={`transition-transform ${expanded ? 'rotate-90' : ''}`}>▸</span>
-                              {exp.replicate_letters?.length ?? exp.replicates!.length}
-                              {' '}replicates:{' '}
-                              {(exp.replicate_letters
-                                ?? exp.replicates!.map((r) => r.replicate_label)
-                              ).join(', ')}
-                            </button>
-                          ) : vialCount > 1 ? (
-                            // Issue #101: a row collapsing several '-t<days>' vials with
-                            // no replicate letters had no expander and no count, so it was
-                            // indistinguishable from a standalone experiment -- and its
-                            // status silently went read-only with nothing to explain why.
-                            // There is nothing to expand here (every vial carries the same
-                            // label once the token is stripped); the per-vial breakdown is
-                            // the group page this row now links to.
-                            <span className="ml-2 inline-flex items-center rounded bg-surface-raised px-1.5 py-0.5 text-2xs text-ink-secondary">
-                              {vialCount} vials
-                            </span>
-                          ) : null
+                        expanded={expanded}
+                        onToggle={() =>
+                          setExpandedGroups((prev) => {
+                            const next = new Set(prev)
+                            if (next.has(exp.id)) next.delete(exp.id)
+                            else next.add(exp.id)
+                            return next
+                          })
                         }
                       />
                       {hasReplicates && expanded &&
@@ -332,7 +304,12 @@ export function ExperimentListPage() {
 }
 
 /** A single experiment row; shared by group-parent and expanded-child rendering. */
-function ExperimentRow({ exp, child, groupBadge }: { exp: ExperimentListItem; child?: boolean; groupBadge?: ReactNode }) {
+function ExperimentRow({ exp, child, expanded, onToggle }: {
+  exp: ExperimentListItem
+  child?: boolean
+  expanded?: boolean
+  onToggle?: () => void
+}) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { error: toastError } = useToast()
@@ -369,8 +346,9 @@ function ExperimentRow({ exp, child, groupBadge }: { exp: ExperimentListItem; ch
   const isGroupRow = isLetterGroupRow || isVialSetRow
   const target = isGroupRow
     ? `/experiments/groups/${encodeURIComponent(displayId)}`
-    : `/experiments/${encodeURIComponent(exp.experiment_id)}`
-  const runPath = runPathFor(exp.experiment_type, exp.base_experiment_id)
+    : experimentHomePath(exp.experiment_type, exp.experiment_id, exp.base_experiment_id)
+  // Issue #98: letters when the group has them, else the replicate rows' own labels.
+  const replicateLetters = exp.replicate_letters ?? exp.replicates?.map((r) => r.replicate_label) ?? []
 
   const statusMutation = useMutation({
     mutationFn: ({ experimentId, status }: { experimentId: string; status: ExperimentStatus }) =>
@@ -402,12 +380,35 @@ function ExperimentRow({ exp, child, groupBadge }: { exp: ExperimentListItem; ch
             displayId
           )}
         </span>
-        {isGroupRow && <Badge className="ml-2">group</Badge>}
+        {isLetterGroupRow ? (
+          <button
+            aria-label={`group · ${replicateLetters.length}: show replicates of ${displayId}`}
+            aria-expanded={expanded ?? false}
+            title={`${replicateLetters.length} replicates: ${replicateLetters.join(', ')}`}
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggle?.()
+            }}
+            className="ml-2 inline-flex items-center gap-1.5 px-2 py-0.5 text-2xs font-medium rounded border uppercase tracking-wider bg-surface-overlay text-ink-secondary border-surface-border cursor-pointer hover:text-ink-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-red-500"
+          >
+            group · {replicateLetters.length}
+            <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+          </button>
+        ) : (
+          // Issue #101: a letterless vial set has nothing to expand (every vial
+          // carries the same label once the '-t<days>' token is stripped); the
+          // per-vial breakdown is the group page this row links to.
+          isVialSetRow && <Badge className="ml-2">group · {exp.vial_count} vials</Badge>
+        )}
         {exp.is_background && <Badge variant="info" className="ml-2">BG</Badge>}
-        {groupBadge}
       </Td>
-      <Td className="text-xs text-ink-secondary max-w-48 truncate">
-        {exp.description ?? <span className="text-ink-muted">—</span>}
+      <Td
+        className="text-xs text-ink-secondary"
+        title={exp.description ?? undefined}
+      >
+        <div className="min-w-[16rem] max-w-[36rem] whitespace-normal line-clamp-2">
+          {exp.description ?? <span className="text-ink-muted">—</span>}
+        </div>
       </Td>
       <Td className="font-mono-data text-xs">
         {exp.sample_id ?? <span className="text-ink-muted">—</span>}
@@ -415,16 +416,6 @@ function ExperimentRow({ exp, child, groupBadge }: { exp: ExperimentListItem; ch
       <Td className="font-mono-data text-xs">
         {exp.reactor_number == null ? (
           <span className="text-ink-muted">—</span>
-        ) : runPath ? (
-          // Issue #159: the list's only way to an HPHT or Core Flood run page.
-          <Link
-            to={runPath}
-            title={`Open run ${exp.base_experiment_id}`}
-            onClick={(e) => e.stopPropagation()}
-            className="text-red-400 hover:text-red-300"
-          >
-            {exp.reactor_slot ?? exp.reactor_number}
-          </Link>
         ) : (
           exp.reactor_slot ?? exp.reactor_number
         )}
@@ -461,7 +452,7 @@ function ExperimentRow({ exp, child, groupBadge }: { exp: ExperimentListItem; ch
       <Td className="font-mono-data text-xs text-ink-muted">{exp.date ? labDateOf(exp.date) : '—'}</Td>
       {/* Issue #168: a lab-local date from the server; a group or vial row carries its latest. */}
       <Td className="font-mono-data text-xs text-ink-muted">{exp.last_result_date ?? '—'}</Td>
-      <Td className="text-xs text-ink-secondary max-w-48 truncate">
+      <Td className="text-xs text-ink-secondary max-w-48 truncate" title={exp.additives_summary ?? undefined}>
         {exp.additives_summary ?? <span className="text-ink-muted">—</span>}
       </Td>
     </TableRow>

@@ -2,43 +2,14 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { experimentsApi, type ResultWithFlags } from '@/api/experiments'
-import { resultsApi } from '@/api/results'
-import { Button, Num, PageSpinner, Spinner } from '@/components/ui'
+import { Button, PageSpinner } from '@/components/ui'
 import { RunSamplesTable, type SampleKind } from '@/components/results/RunSamplesTable'
+import { ScalarExtras } from '@/components/results/ScalarExtras'
 import { fromResult, type SampleRow } from '@/components/results/sampleRows'
 import { ResultEntryModal } from './ResultEntryModal'
 import { isCoreFloodType, isHphtType, runPathFor } from '@/utils/experimentId'
 import { GroupedResultsView } from './GroupedResultsView'
 import { IcpSection } from './IcpSection'
-
-/** DETAILS extras on the Results tab: scalar values that are not table columns.
- *  Loaded when the section opens (the list payload does not carry them). */
-function ScalarExtras({ resultId }: { resultId: number }) {
-  const { data: scalar, isLoading } = useQuery({
-    queryKey: ['scalar', resultId],
-    queryFn: () => resultsApi.getScalar(resultId),
-  })
-  if (isLoading) return <Spinner size="sm" />
-  if (!scalar) return null
-  const values = ([
-    ['DO', scalar.final_dissolved_oxygen_mg_L, 'mg/L'],
-    ['Fe(II)', scalar.ferrous_iron_yield, ''],
-  ] as const).filter(([, v]) => v != null)
-  if (values.length === 0) return null
-  return (
-    <div>
-      <p className="text-xs font-semibold text-ink-secondary mb-1">Scalar Results</p>
-      <div className="grid grid-cols-4 gap-x-4 gap-y-1">
-        {values.map(([label, v, unit]) => (
-          <div key={label} className="text-xs">
-            <span className="text-ink-muted">{label}: </span>
-            <span className="font-mono-data text-ink-primary"><Num value={v} />{unit ? ` ${unit}` : ''}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
 
 /** The experiment kind for the shared column spec. */
 function sampleKind(experimentType: string | null | undefined): SampleKind {

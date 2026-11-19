@@ -126,6 +126,10 @@ interface Props<S> {
   detailsExtra?: (row: SampleRow<S>) => ReactNode
   /** Shown in place of rows when there are none; omit to show the header alone. */
   emptyText?: string
+  /** Where a Segment cell links, in place of the experiment's detail page. */
+  segmentHref?: (experimentId: string) => string
+  /** Rows of this experiment get a red mark on their first cell. */
+  markedExperimentId?: string
 }
 
 /** The samples table of the Results tab and both run pages (issue #163): one
@@ -133,6 +137,7 @@ interface Props<S> {
  *  and DETAILS flags beside the result note. */
 export function RunSamplesTable<S>({
   rows, scope, kind, variant = false, onEdit, canEdit = () => true, icpByResult, detailsExtra, emptyText,
+  segmentHref, markedExperimentId,
 }: Props<S>) {
   const flags = useSampleFlags()
   const columns = columnsFor(scope, kind, variant)
@@ -180,6 +185,7 @@ export function RunSamplesTable<S>({
           const extra = detailsExtra?.(r)
           const showDetails = hasDetails(r, extra != null)
           const editable = onEdit !== undefined && canEdit(r)
+          const marked = markedExperimentId !== undefined && r.experimentId === markedExperimentId
           const note = r.notes
             .filter((n) => n.note_type === 'result_note' || n.note_type === 'observation')
             .map((n) => n.note_text)
@@ -189,13 +195,14 @@ export function RunSamplesTable<S>({
               <TableRow
                 className={`group ${editable ? 'cursor-pointer' : ''}`}
                 data-testid={`sample-${r.resultId}`}
+                data-marked={marked ? 'true' : undefined}
                 tabIndex={editable ? 0 : undefined}
                 onClick={editable ? () => onEdit(r.source) : undefined}
                 onKeyDown={editable
                   ? (e) => { if (e.key === 'Enter' && e.target === e.currentTarget) onEdit(r.source) }
                   : undefined}
               >
-                {columns.map((c) => {
+                {columns.map((c, i) => {
                   const sticky = stickyFor(c.key)
                   if (c.key === 'note') {
                     return (
@@ -223,13 +230,16 @@ export function RunSamplesTable<S>({
                         CELL,
                         c.key === 'date' ? 'text-ink-muted' : '',
                         sticky ? `${sticky} ${STICKY_ROW_BG}` : '',
+                        marked && i === 0 ? 'border-l-2 border-brand-red' : '',
                       ].join(' ')}
                       title={c.key === 'segment' ? r.experimentId : undefined}
                     >
                       {c.key === 'day' && scope === 'segment' && r.isPrimary && (
                         <span className="text-ink-muted mr-1" title="Primary result for this timepoint">★</span>
                       )}
-                      {c.cell(r)}
+                      {c.key === 'segment'
+                        ? <SegmentLink id={r.experimentId} to={segmentHref?.(r.experimentId)} />
+                        : c.cell(r)}
                     </Td>
                   )
                 })}

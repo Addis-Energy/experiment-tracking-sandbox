@@ -13,3 +13,28 @@ export interface RunWrites {
   /** Query key of a run's detail query (removed when the run disappears). */
   runQueryKey: (baseId: string) => unknown[]
 }
+
+/** The parts of a cached run payload a segment delete trims. HPHT also carries the
+ *  run's conditions summary, which goes with its segment. */
+interface TrimmableRun {
+  segments: { experiment_id: string }[]
+  samples: { experiment_id: string }[]
+  conditions?: { experiment_id: string } | null
+}
+
+/** Drops a deleted segment from the cached run: the segment, its samples, and the
+ *  conditions summary when it belonged to it. Until the run refetch lands, the page
+ *  then never selects the deleted segment, so it is never fetched into a 404. Used
+ *  by every delete path of a segment that leaves the run with others (the record
+ *  header and the Segments table). */
+export function trimDeletedSegment(qc: QueryClient, writes: RunWrites, baseId: string, deletedId: string): void {
+  qc.setQueryData<TrimmableRun>(writes.runQueryKey(baseId), (cached) => {
+    if (!cached) return cached
+    const trimmed = {
+      ...cached,
+      segments: cached.segments.filter((s) => s.experiment_id !== deletedId),
+      samples: cached.samples.filter((s) => s.experiment_id !== deletedId),
+    }
+    return cached.conditions?.experiment_id === deletedId ? { ...trimmed, conditions: null } : trimmed
+  })
+}

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { RunSegment } from '@/api/runs'
 import { experimentsApi } from '@/api/experiments'
@@ -9,7 +9,8 @@ import { DescriptionEditor } from '@/pages/ExperimentDetail/DescriptionEditor'
 import { SegmentStatusSelect } from '@/components/runs/SegmentStatusSelect'
 import { SegmentLink } from '@/components/runs/SegmentLink'
 import { DeleteExperimentModal } from '@/components/experiments/DeleteExperimentModal'
-import type { RunWrites } from '@/components/runs/runWrites'
+import { trimDeletedSegment, type RunWrites } from '@/components/runs/runWrites'
+import { runViewSearch } from '@/components/runs/runView'
 import { CORE_FLOOD_WRITES } from './useCoreFloodWrites'
 
 interface Props {
@@ -43,6 +44,7 @@ function RenameCell({
   const [draft, setDraft] = useState(segment.experiment_id)
   const qc = useQueryClient()
   const navigate = useNavigate()
+  const [params] = useSearchParams()
   const { success, error: toastError } = useToast()
   const validation = useExperimentIdValidation(draft, segment.experiment_id)
   const trimmed = draft.trim()
@@ -51,18 +53,25 @@ function RenameCell({
     mutationFn: (newId: string) => experimentsApi.patch(segment.experiment_id, { experiment_id: newId }),
     onSuccess: (updated) => {
       const newBase = updated.base_experiment_id ?? updated.experiment_id
+      const leaving = newBase !== baseId && segmentCount === 1
       onDone()
+      // The URL selected the renamed segment: follow it to its new ID.
+      if (!leaving && params.get('segment') === segment.experiment_id) {
+        navigate({ search: runViewSearch(params, { segmentId: updated.experiment_id }) }, { replace: true })
+      }
       if (newBase !== baseId) {
-        if (segmentCount === 1) {
+        if (leaving) {
           navigate(writes.runPath(newBase), { replace: true })
         } else {
           success('Segment renamed', `${updated.experiment_id} moved to run ${newBase}`)
         }
         void writes.invalidate(qc, newBase, [])
         // The run's only segment left it, so the old run is gone: refetching 404s.
-        if (segmentCount === 1) qc.removeQueries({ queryKey: writes.runQueryKey(baseId) })
+        if (leaving) qc.removeQueries({ queryKey: writes.runQueryKey(baseId) })
       }
-      return writes.invalidate(qc, baseId, [segment.experiment_id, updated.experiment_id])
+      // Not the old ID: it no longer exists, and the selected segment's record may
+      // still be observing it until the new URL renders (a refetch would 404).
+      return writes.invalidate(qc, baseId, [updated.experiment_id])
     },
     onError: (err: Error) => toastError('Rename failed', err.message),
   })
@@ -137,6 +146,7 @@ export function SegmentsTable({
 }: Props) {
   const qc = useQueryClient()
   const navigate = useNavigate()
+  const [params] = useSearchParams()
   const { success } = useToast()
   const [deleting, setDeleting] = useState<string | null>(null)
 
@@ -146,7 +156,14 @@ export function SegmentsTable({
     setDeleting(null)
     success('Segment deleted', deletedId)
     if (segments.length > 1) {
-      void writes.invalidate(qc, baseId, [deletedId])
+      // As the record header's delete does: trim the cached run first, so until the
+      // refetch lands the page never selects (and fetches into a 404) the deleted segment.
+      trimDeletedSegment(qc, writes, baseId, deletedId)
+      if (params.get('segment') === deletedId) {
+        navigate({ search: runViewSearch(params, { segmentId: null }) }, { replace: true })
+      }
+      // No segment ID: invalidating the deleted experiment would refetch it into a 404.
+      void writes.invalidate(qc, baseId, [])
       return
     }
     // The run is gone with its last segment. Leave first, then drop the run's
@@ -182,7 +199,8 @@ export function SegmentsTable({
                 />
               ) : (
                 <div className="flex items-center gap-2">
-                  <SegmentLink id={seg.experiment_id} />
+                  {/* Selects the segment on this run page, not the experiment page. */}
+                  <SegmentLink id={seg.experiment_id} to={runViewSearch(params, { segmentId: seg.experiment_id })} />
                   <Button
                     variant="ghost"
                     size="xs"

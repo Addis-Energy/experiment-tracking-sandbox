@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { hphtApi, type HphtRun, type HphtSample, type HphtWarning } from '@/api/hpht'
 import { Badge, Breadcrumb, Button, Card, CardHeader, PageSpinner } from '@/components/ui'
@@ -8,13 +8,18 @@ import { IcpChart } from '@/components/icp/IcpChart'
 import { segmentStarts } from '@/components/icp/icpSeries'
 import { Collapsible } from '@/components/runs/Collapsible'
 import { RunNotFound, SegmentIdList, useCanonicalRunUrl } from '@/components/runs/runPageNav'
+import { RunTabs } from '@/components/runs/RunTabs'
+import { SegmentPicker } from '@/components/runs/SegmentPicker'
+import { runViewSearch, sampleMarks } from '@/components/runs/runView'
+import { RunTitle, useRunRecord } from '@/components/runs/useRunRecord'
 import { SegmentStatusSelect } from '@/components/runs/SegmentStatusSelect'
 import { latestSegment, ongoingIds, rootSegments, runDescription } from '@/components/runs/runSegments'
 import { SegmentsTable } from '@/pages/CoreFloods/SegmentsTable'
 import { ConditionsSummaryCard } from './ConditionsSummaryCard'
-import { HphtCharts } from './HphtCharts'
+import { H2Charts } from '@/components/runs/H2Charts'
 import { HphtSampleModal } from './HphtSampleModal'
 import { RunSamplesTable } from '@/components/results/RunSamplesTable'
+import { scalarDetails } from '@/components/results/ScalarExtras'
 import { fromHpht } from '@/components/results/sampleRows'
 import { HPHT_WRITES, invalidateHphtWrites } from './hphtWrites'
 
@@ -29,17 +34,26 @@ function WarningLine({ run, warning }: { run: HphtRun; warning: HphtWarning }) {
   const qc = useQueryClient()
   const ids = warning.experiment_ids
   const joined = ids.join(', ')
+  // The Segments section exists only on a multi-segment run; a single segment is
+  // edited in the record header at the top of the page.
+  const multi = run.segments.length > 1
   switch (warning.code) {
     case 'multiple_roots':
       return <p>Several segments have no parent: <span className={MONO}>{joined}</span>. Rename the extra roots into this run&apos;s sequence (Segments).</p>
     case 'missing_description':
-      return <p>No description on <span className={MONO}>{joined}</span>. Add one in Segments.</p>
+      return (
+        <p>
+          No description on <span className={MONO}>{joined}</span>.{' '}
+          {multi ? 'Add one in Segments.' : 'Add one under the ID above.'}
+        </p>
+      )
     case 'base_mismatch':
       return (
         <p>
           <span className={MONO}>{joined}</span> {ids.length === 1 ? 'does' : 'do'} not follow the run&apos;s
           base ID <span className={MONO}>{run.base_id}</span> (expected <span className={MONO}>{run.base_id}-2</span>,{' '}
-          <span className={MONO}>{run.base_id}_Text</span>, …). Rename in Segments.
+          <span className={MONO}>{run.base_id}_Text</span>, …).{' '}
+          {multi ? 'Rename in Segments.' : 'Rename it with the pencil beside the ID above.'}
         </p>
       )
     case 'multiple_ongoing':
@@ -68,18 +82,18 @@ function WarningLine({ run, warning }: { run: HphtRun; warning: HphtWarning }) {
 /** One HPHT run (issue #150): conditions, sample timeline, cumulative charts and inline entry. */
 export function HphtRunPage() {
   const { baseId = '' } = useParams<{ baseId: string }>()
+  const [params] = useSearchParams()
   const [modal, setModal] = useState<{ editing?: HphtSample } | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [describing, setDescribing] = useState<string | null>(null)
-  // null until the user toggles it: then a run with several segments opens with
-  // the table showing (issue #158).
-  const [segmentsOpen, setSegmentsOpen] = useState<boolean | null>(null)
 
   const { data: run, isLoading, error } = useQuery({
     queryKey: HPHT_WRITES.runQueryKey(baseId),
     queryFn: () => hphtApi.get(baseId),
   })
   useCanonicalRunUrl(baseId, run, HPHT_WRITES)
+
+  const { view, recordHeader } = useRunRecord({ run, params, writes: HPHT_WRITES, type: 'HPHT' })
 
   // An ICP failure only hides the expanders and chart; it never breaks the run page.
   const { data: icpRows } = useQuery({
@@ -111,31 +125,16 @@ export function HphtRunPage() {
   const exportId = (rootSegments(run.segments)[0] ?? run.segments[0])?.experiment_id
   const onEdit = (s: HphtSample) => setModal({ editing: s })
 
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-1">
-          <Breadcrumb items={[{ label: 'HPHT', to: '/hpht' }, { label: run.base_id, mono: true }]} />
-          <h1 className="text-lg font-semibold text-ink-primary font-mono-data">{run.base_id}</h1>
-          {description && <p className="text-sm text-ink-secondary max-w-prose">{description}</p>}
-          <div className="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
-            <span>Reactor {reactor ?? '—'}</span>
-            {ongoing.length > 0 && (
-              <Badge variant="ongoing">
-                Ongoing: <SegmentIdList ids={ongoing} inherit />
-              </Badge>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {exportId && <ExportAllButton experimentId={exportId} />}
-          <Button variant="primary" size="sm" onClick={() => setModal({})}>
-            + Add sample
-          </Button>
-        </div>
-      </div>
+  const multi = run.segments.length > 1
+  const segmentHref = (id: string) => runViewSearch(params, { segmentId: id })
+  const marks = sampleMarks(view, run.segments)
 
-      <ConditionsSummaryCard conditions={run.conditions} />
+  const results = (
+    <div className="space-y-4">
+      <ConditionsSummaryCard
+        conditions={run.conditions}
+        conditionsHref={runViewSearch(params, { segmentId: run.conditions?.experiment_id, tab: 'conditions' })}
+      />
 
       <section aria-labelledby="samples-heading">
         <Card padding="none">
@@ -145,12 +144,15 @@ export function HphtRunPage() {
           <div className="p-4">
             {/* Issue #163: newest first (the server sends oldest first). */}
             <RunSamplesTable
-              rows={[...main].reverse().map(fromHpht)}
+              rows={[...(view?.only ? main.filter((s) => s.experiment_id === view.segmentId) : main)].reverse().map(fromHpht)}
               scope="run"
               kind="hpht"
               onEdit={onEdit}
               icpByResult={icpByResult}
               emptyText="No samples yet"
+              segmentHref={segmentHref}
+              markedExperimentId={marks.main}
+              detailsExtra={scalarDetails}
             />
           </div>
         </Card>
@@ -159,16 +161,32 @@ export function HphtRunPage() {
       <section aria-labelledby="charts-heading">
         <Card padding="none">
           <CardHeader>
-            <h2 id="charts-heading" className={HEADING}>Run to date</h2>
+            <h2 id="charts-heading" className={HEADING}>H₂ over time</h2>
           </CardHeader>
           <div className="p-4">
-            <HphtCharts samples={run.samples} />
+            <H2Charts samples={run.samples} />
           </div>
         </Card>
       </section>
 
+      {icpRows && icpRows.length > 0 && (
+        <Collapsible
+          title="ICP over time"
+          summary={`${icpRows.length} ${icpRows.length === 1 ? 'sample' : 'samples'}`}
+          defaultOpen
+        >
+          <IcpChart rows={icpRows} markers={segmentStarts(run.samples)} />
+        </Collapsible>
+      )}
+
       {side.length > 0 && (
-        <Collapsible title="Side samples" summary={`${side.length} (variants, raw values)`}>
+        <Collapsible
+          // key: picking a side sample opens the section on its marked row.
+          key={marks.side ?? 'none'}
+          title="Side samples"
+          summary={`${side.length} (variants, raw values)`}
+          defaultOpen={marks.side !== undefined}
+        >
           <RunSamplesTable
             rows={[...side].reverse().map(fromHpht)}
             scope="run"
@@ -176,36 +194,31 @@ export function HphtRunPage() {
             variant
             onEdit={onEdit}
             icpByResult={icpByResult}
+            segmentHref={segmentHref}
+            markedExperimentId={marks.side}
+            detailsExtra={scalarDetails}
           />
         </Collapsible>
       )}
 
-      {icpRows && icpRows.length > 0 && (
+      {multi && (
         <Collapsible
-          title="ICP over time"
-          summary={`${icpRows.length} ${icpRows.length === 1 ? 'sample' : 'samples'}`}
+          title="Segments"
+          summary={run.segments.length}
+          links={<>(<SegmentIdList ids={run.segments.map((s) => s.experiment_id)} hrefFor={segmentHref} />)</>}
+          defaultOpen
         >
-          <IcpChart rows={icpRows} markers={segmentStarts(run.samples)} />
+          <SegmentsTable
+            baseId={run.base_id}
+            segments={run.segments}
+            renaming={renaming}
+            setRenaming={setRenaming}
+            describing={describing}
+            setDescribing={setDescribing}
+            writes={HPHT_WRITES}
+          />
         </Collapsible>
       )}
-
-      <Collapsible
-        title="Segments"
-        summary={run.segments.length}
-        links={<>(<SegmentIdList ids={run.segments.map((s) => s.experiment_id)} />)</>}
-        open={segmentsOpen ?? run.segments.length > 1}
-        onOpenChange={setSegmentsOpen}
-      >
-        <SegmentsTable
-          baseId={run.base_id}
-          segments={run.segments}
-          renaming={renaming}
-          setRenaming={setRenaming}
-          describing={describing}
-          setDescribing={setDescribing}
-          writes={HPHT_WRITES}
-        />
-      </Collapsible>
 
       {run.warnings.length > 0 && (
         <Collapsible title="Data checks" summary={run.warnings.length}>
@@ -218,6 +231,36 @@ export function HphtRunPage() {
           </ul>
         </Collapsible>
       )}
+    </div>
+  )
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <Breadcrumb items={[{ label: 'HPHT', to: '/hpht' }, { label: run.base_id, mono: true }]} />
+          <RunTitle run={run} description={description} recordHeader={recordHeader} />
+          <div className="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
+            <span>Reactor {reactor ?? '—'}</span>
+            {ongoing.length > 0 && (
+              <Badge variant="ongoing">
+                Ongoing: <SegmentIdList ids={ongoing} inherit hrefFor={segmentHref} />
+              </Badge>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {exportId && <ExportAllButton experimentId={exportId} />}
+          <Button variant="primary" size="sm" onClick={() => setModal({})}>
+            + Add sample
+          </Button>
+        </div>
+      </div>
+
+      {view && multi && <SegmentPicker segments={run.segments} view={view} />}
+      {multi && recordHeader}
+
+      {view ? <RunTabs view={view} results={results} /> : results}
 
       <HphtSampleModal
         open={modal !== null}

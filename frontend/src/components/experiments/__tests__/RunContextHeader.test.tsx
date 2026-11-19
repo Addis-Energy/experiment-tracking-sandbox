@@ -32,7 +32,6 @@ import { conditionsApi } from '@/api/conditions'
 import { hphtApi } from '@/api/hpht'
 import { coreFloodsApi } from '@/api/coreFloods'
 import type { ExperimentDetail, ReplicateGroup } from '@/api/experiments'
-import type { RunSegment } from '@/api/runs'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, staleTime: 0 }, mutations: { retry: false } },
@@ -79,16 +78,11 @@ beforeEach(() => {
   vi.mocked(conditionsApi.getByExperiment).mockRejectedValue(new Error('none'))
   vi.mocked(experimentsApi.getReplicateGroup).mockRejectedValue(new Error('404'))
   vi.mocked(experimentsApi.getGroup).mockRejectedValue(new Error('404'))
+  // A run that loads and holds the segment redirects the detail page away, so the
+  // header cases reject the run: the page renders (its fallback).
+  vi.mocked(hphtApi.get).mockRejectedValue(new Error('404'))
+  vi.mocked(coreFloodsApi.get).mockRejectedValue(new Error('404'))
 })
-
-function segment(experiment_id: string, extra: Partial<RunSegment> = {}): RunSegment {
-  return {
-    id: experiment_id.length, experiment_id, status: 'COMPLETED', date: null,
-    parent_experiment_id: null, is_variant: false, description: null,
-    conditions_id: null, pore_volume_mL: null, rock_mass_g: null, reactor_slot: null,
-    ...extra,
-  }
-}
 
 /** A segment page whose conditions name the run type and reactor. */
 function mockSegmentPage(experimentId: string, baseId: string, experimentType: string) {
@@ -104,86 +98,36 @@ function mockSegmentPage(experimentId: string, baseId: string, experimentType: s
   } as never)
 }
 
-const HPHT_RUN = {
-  base_id: 'HPHT_297',
-  segments: [
-    segment('HPHT_297'),
-    segment('HPHT_297-2', { status: 'ONGOING', parent_experiment_id: 'HPHT_297' }),
-    segment('HPHT_297_Desorption', { parent_experiment_id: 'HPHT_297', is_variant: true }),
-  ],
-  conditions: null, samples: [], warnings: [],
-}
-
 const breadcrumb = () => screen.getByRole('navigation', { name: 'Breadcrumb' })
 
 describe('detail header run context — issue #156', () => {
-  it('names the HPHT run: breadcrumb, strip of every segment, reactor link', async () => {
+  it('names the HPHT run in the breadcrumb and links the reactor to it', async () => {
     mockSegmentPage('HPHT_297-2', 'HPHT_297', 'HPHT')
-    vi.mocked(hphtApi.get).mockResolvedValue(HPHT_RUN as never)
-
-    renderPage('HPHT_297-2')
-
-    const strip = await screen.findByRole('group', { name: 'Run HPHT_297' })
-    expect(breadcrumb()).toHaveTextContent(/^Experiments›Run HPHT_297›HPHT_297-2$/)
-    expect(within(breadcrumb()).getByRole('link', { name: 'Run HPHT_297' })).toHaveAttribute(
-      'href', '/hpht/HPHT_297',
-    )
-    expect(hphtApi.get).toHaveBeenCalledWith('HPHT_297')
-
-    // Variants follow their parent; the current segment is bracketed text, not a link.
-    expect(strip).toHaveTextContent(/HPHT_297.*HPHT_297_Desorption.*\[HPHT_297-2\]/)
-    expect(within(strip).getByRole('link', { name: 'HPHT_297_Desorption' })).toHaveAttribute(
-      'href', '/experiments/HPHT_297_Desorption',
-    )
-    expect(within(strip).queryByRole('link', { name: 'HPHT_297-2' })).toBeNull()
-    expect(within(strip).getByText('Ongoing')).toBeInTheDocument()
-    const runLinks = within(strip).getAllByRole('link', { name: 'HPHT_297' }).map((a) => a.getAttribute('href'))
-    expect(runLinks).toEqual(['/hpht/HPHT_297', '/experiments/HPHT_297'])
-
-    expect(screen.getByRole('link', { name: 'Reactor R07' })).toHaveAttribute('href', '/hpht/HPHT_297')
-  })
-
-  it('links a core flood variant to its parent run (#138)', async () => {
-    mockSegmentPage('CF_020-5_Bypass1', 'CF_020', 'Core Flood')
-    vi.mocked(coreFloodsApi.get).mockResolvedValue({
-      base_id: 'CF_020',
-      segments: [
-        segment('CF_020'),
-        segment('CF_020-5', { parent_experiment_id: 'CF_020' }),
-        segment('CF_020-5_Bypass1', { parent_experiment_id: 'CF_020-5', is_variant: true }),
-      ],
-      samples: [], warnings: [],
-    } as never)
-
-    renderPage('CF_020-5_Bypass1')
-
-    const strip = await screen.findByRole('group', { name: 'Run CF_020' })
-    expect(breadcrumb()).toHaveTextContent(/^Experiments›Run CF_020›CF_020-5_Bypass1$/)
-    expect(within(breadcrumb()).getByRole('link', { name: 'Run CF_020' })).toHaveAttribute(
-      'href', '/core-floods/CF_020',
-    )
-    expect(coreFloodsApi.get).toHaveBeenCalledWith('CF_020')
-    expect(hphtApi.get).not.toHaveBeenCalled()
-    expect(strip).toHaveTextContent(/CF_020.*CF_020-5.*\[CF_020-5_Bypass1\]/)
-    expect(within(strip).getByRole('link', { name: 'CF_020-5' })).toHaveAttribute('href', '/experiments/CF_020-5')
-  })
-
-  it('hides the strip when the run cannot be loaded and keeps the rest of the page', async () => {
-    mockSegmentPage('HPHT_297-2', 'HPHT_297', 'HPHT')
-    vi.mocked(hphtApi.get).mockRejectedValue(new Error('404'))
 
     renderPage('HPHT_297-2')
 
     await screen.findByRole('heading', { name: 'HPHT_297-2' })
-    await vi.waitFor(() => expect(hphtApi.get).toHaveBeenCalled())
-    expect(screen.queryByRole('group', { name: /^Run / })).toBeNull()
     expect(breadcrumb()).toHaveTextContent(/^Experiments›Run HPHT_297›HPHT_297-2$/)
-    expect(screen.queryByText(/not changed|failed/i)).toBeNull()
+    expect(within(breadcrumb()).getByRole('link', { name: 'Run HPHT_297' })).toHaveAttribute(
+      'href', '/hpht/HPHT_297',
+    )
+    expect(screen.getByRole('link', { name: 'Reactor R07' })).toHaveAttribute('href', '/hpht/HPHT_297')
+  })
+
+  it('links a core flood variant to its parent run in the breadcrumb (#138)', async () => {
+    mockSegmentPage('CF_020-5_Bypass1', 'CF_020', 'Core Flood')
+
+    renderPage('CF_020-5_Bypass1')
+
+    await screen.findByRole('heading', { name: 'CF_020-5_Bypass1' })
+    expect(breadcrumb()).toHaveTextContent(/^Experiments›Run CF_020›CF_020-5_Bypass1$/)
+    expect(within(breadcrumb()).getByRole('link', { name: 'Run CF_020' })).toHaveAttribute(
+      'href', '/core-floods/CF_020',
+    )
   })
 
   it('changes status in place and refreshes the run and the dashboard', async () => {
     mockSegmentPage('HPHT_297-2', 'HPHT_297', 'HPHT')
-    vi.mocked(hphtApi.get).mockResolvedValue(HPHT_RUN as never)
     vi.mocked(experimentsApi.patchStatus).mockResolvedValue({} as never)
     const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
 

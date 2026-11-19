@@ -32,6 +32,11 @@ describe('SegmentLink', () => {
     expect(screen.getByRole('link', { name: 'a' })).toHaveAttribute('href', '/experiments/SERUM_001a')
   })
 
+  it('uses `to` when given', () => {
+    renderAt(<SegmentLink id="HPHT_297-2" to="?segment=HPHT_297-2" />)
+    expect(screen.getByRole('link', { name: 'HPHT_297-2' })).toHaveAttribute('href', '/?segment=HPHT_297-2')
+  })
+
   it('uses the ID link style, or the muted struck style for an outlier', () => {
     renderAt(
       <>

@@ -23,8 +23,10 @@ function Item({ label, children }: { label: string; children: ReactNode }) {
 const withUnit = (v: number | null, unit: string) => (v == null ? '—' : `${fmt(v)} ${unit}`)
 
 /** Read-only setup of the run's latest non-variant segment, with its additives.
- *  Edits happen on that segment's Conditions tab. */
-export function ConditionsSummaryCard({ conditions }: { conditions: HphtConditionsSummary | null }) {
+ *  Edits happen on the run page's Conditions tab, with that segment selected. */
+export function ConditionsSummaryCard({
+  conditions, conditionsHref,
+}: { conditions: HphtConditionsSummary | null; conditionsHref: string }) {
   const experimentId = conditions?.experiment_id
   // An additives failure leaves the row as "—"; the rest of the card still renders.
   const { data: additives } = useQuery({
@@ -41,16 +43,16 @@ export function ConditionsSummaryCard({ conditions }: { conditions: HphtConditio
             <h2 id="conditions-heading" className={HEADING}>
               Conditions
               {experimentId && (
-                <SegmentLink id={experimentId} className="ml-2 normal-case tracking-normal font-normal" />
+                <SegmentLink
+                  id={experimentId}
+                  to={conditionsHref}
+                  className="ml-2 normal-case tracking-normal font-normal"
+                />
               )}
             </h2>
             {experimentId && (
-              <Link
-                // Explicit tab (issue #162), in case the detail page's default ever changes.
-                to={`/experiments/${encodeURIComponent(experimentId)}?tab=conditions`}
-                className="text-xs text-red-400 hover:text-red-300"
-              >
-                Edit on Conditions tab
+              <Link to={conditionsHref} className="text-xs text-red-400 hover:text-red-300">
+                Edit conditions
               </Link>
             )}
           </div>
