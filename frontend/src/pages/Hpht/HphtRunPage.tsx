@@ -136,8 +136,18 @@ export function HphtRunPage() {
   const multi = run.segments.length > 1
   const segmentHref = (id: string) => runViewSearch(params, { segmentId: id })
   // Issue #158 rule, as SegmentsTable applies it: the run goes with its last segment.
-  const onDeleted = () => {
+  const onDeleted = (deletedId: string) => {
     if (multi) {
+      // Drop the segment from the cached run first, so until the refetch lands the
+      // default segment is never the deleted one (it would be fetched into a 404).
+      qc.setQueryData<HphtRun>(HPHT_WRITES.runQueryKey(run.base_id), (cached) =>
+        cached && {
+          ...cached,
+          conditions: cached.conditions?.experiment_id === deletedId ? null : cached.conditions,
+          segments: cached.segments.filter((s) => s.experiment_id !== deletedId),
+          samples: cached.samples.filter((s) => s.experiment_id !== deletedId),
+        },
+      )
       navigate(HPHT_WRITES.runPath(run.base_id), { replace: true })
       // No segment ID: the record header evicts the deleted experiment's own keys.
       void invalidateHphtWrites(qc, run.base_id, [])

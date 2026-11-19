@@ -414,6 +414,33 @@ describe('one page per run', () => {
     await waitFor(() => expect(currentLocation()).toBe('/hpht/HPHT_297'))
   })
 
+  it('never points at the deleted segment while the run refetches', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2')
+    // Hold the post-delete run back, so the page lives on the cached run.
+    let release: (run: HphtRun) => void = () => {}
+    vi.mocked(hphtApi.get).mockImplementation(() => new Promise<HphtRun>((r) => { release = r }))
+    vi.mocked(experimentsApi.get).mockClear()
+    await deleteViaModal('HPHT_297-2')
+    await waitFor(() => expect(currentLocation()).toBe('/hpht/HPHT_297'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await new Promise((r) => setTimeout(r, 20)) // the header's deferred cache eviction
+
+    expect(screen.queryByRole('link', { name: 'HPHT_297-2' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('sample-12')).not.toBeInTheDocument()
+    expect(experimentsApi.get).not.toHaveBeenCalledWith('HPHT_297-2')
+
+    const remaining: HphtRun = {
+      ...RUN,
+      segments: [RUN.segments[0]],
+      samples: RUN.samples.filter((x) => x.experiment_id === 'HPHT_297'),
+    }
+    release(remaining)
+    // The picker goes once the refetched run has a single segment left.
+    await waitFor(() => expect(screen.queryByRole('navigation', { name: 'Segments' })).not.toBeInTheDocument())
+    expect(screen.getByRole('heading', { level: 1, name: 'HPHT_297' })).toBeInTheDocument()
+    expect(experimentsApi.get).not.toHaveBeenCalledWith('HPHT_297-2')
+  })
+
   it('deleting the only segment goes to the HPHT list', async () => {
     await renderRun('/hpht/HPHT_304')
     await deleteViaModal('HPHT_304')
