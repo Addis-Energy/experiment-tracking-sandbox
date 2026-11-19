@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { coreFloodsApi, type CoreFloodSample } from '@/api/coreFloods'
 import { Badge, Breadcrumb, Button, Card, CardHeader, MetricCard, PageSpinner } from '@/components/ui'
@@ -7,7 +7,12 @@ import { fullValueTitle } from '@/utils/numberFormat'
 import { ExportAllButton } from '@/components/experiments/ExportAllButton'
 import { CleanupPanel } from './CleanupPanel'
 import { Collapsible } from '@/components/runs/Collapsible'
+import { H2Charts } from '@/components/runs/H2Charts'
+import { RunTabs } from '@/components/runs/RunTabs'
+import { SegmentPicker } from '@/components/runs/SegmentPicker'
+import { runViewSearch } from '@/components/runs/runView'
 import { RunNotFound, SegmentIdList, useCanonicalRunUrl } from '@/components/runs/runPageNav'
+import { RunTitle, useRunRecord } from '@/components/runs/useRunRecord'
 import { CORE_FLOOD_WRITES } from './useCoreFloodWrites'
 import { latestSegment, ongoingIds, rootSegments, runDescription } from '@/components/runs/runSegments'
 import { CoreFloodSampleModal } from './CoreFloodSampleModal'
@@ -24,14 +29,15 @@ interface ApiError extends Error {
 
 const HEADING = 'text-xs font-semibold text-ink-secondary uppercase tracking-wider'
 
-/** One core flood run: header metrics, segments, samples and side samples. */
+/** One core flood run: sample timeline, H₂ and ICP charts, and the selected segment's record and tabs. */
 export function CoreFloodRunPage() {
   const { baseId = '' } = useParams<{ baseId: string }>()
+  const [params] = useSearchParams()
   const [modal, setModal] = useState<{ editing?: CoreFloodSample } | null>(null)
   const [renaming, setRenaming] = useState<string | null>(null)
   const [describing, setDescribing] = useState<string | null>(null)
   // null until the user toggles it: then a run with several segments opens with
-  // the table showing (issue #158).
+  // the table showing (issue #158). A single-segment run has no table.
   const [segmentsOpen, setSegmentsOpen] = useState<boolean | null>(null)
 
   const { data: run, isLoading, error } = useQuery({
@@ -40,7 +46,9 @@ export function CoreFloodRunPage() {
   })
   useCanonicalRunUrl(baseId, run, CORE_FLOOD_WRITES)
 
-  // An ICP failure only hides the expanders; it never breaks the run page.
+  const { view, recordHeader } = useRunRecord({ run, params, writes: CORE_FLOOD_WRITES, type: 'Core Flood' })
+
+  // An ICP failure only hides the expanders and chart; it never breaks the run page.
   const { data: icpRows } = useQuery({
     queryKey: ['core-flood-icp', baseId],
     queryFn: () => coreFloodsApi.icp(baseId),
@@ -75,30 +83,21 @@ export function CoreFloodRunPage() {
   const exportId = (rootSegments(run.segments)[0] ?? run.segments[0])?.experiment_id
   const onEdit = (s: CoreFloodSample) => setModal({ editing: s })
 
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-1">
-          <Breadcrumb items={[{ label: 'Core Floods', to: '/core-floods' }, { label: run.base_id, mono: true }]} />
-          <h1 className="text-lg font-semibold text-ink-primary font-mono-data">{run.base_id}</h1>
-          {description && <p className="text-sm text-ink-secondary max-w-prose">{description}</p>}
-          <div className="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
-            <span>Rig {rig ?? '—'}</span>
-            {ongoing.length > 0 && (
-              <Badge variant="ongoing">
-                Ongoing: <SegmentIdList ids={ongoing} inherit />
-              </Badge>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {exportId && <ExportAllButton experimentId={exportId} />}
-          <Button variant="primary" size="sm" onClick={() => setModal({})}>
-            + Add sample
-          </Button>
-        </div>
-      </div>
+  const multi = run.segments.length > 1
+  const segmentHref = (id: string) => runViewSearch(params, { segmentId: id })
+  // Data checks rename a segment or edit its description: in the Segments table on a
+  // multi-segment run, else in the record header, which is the page heading.
+  const editSegment = (open: (id: string) => void) => (id: string) => {
+    if (multi) {
+      setSegmentsOpen(true)
+      open(id)
+    } else {
+      document.getElementById('record-header')?.scrollIntoView?.()
+    }
+  }
 
+  const results = (
+    <div className="space-y-4">
       <section aria-labelledby="samples-heading">
         <Card padding="none">
           <CardHeader>
@@ -107,15 +106,38 @@ export function CoreFloodRunPage() {
           <div className="p-4">
             {/* Issue #163: newest first (the server sends oldest first). */}
             <RunSamplesTable
-              rows={[...main].reverse().map(fromCoreFlood)}
+              rows={[...(view?.only ? main.filter((s) => s.experiment_id === view.segmentId) : main)].reverse().map(fromCoreFlood)}
               scope="run"
               kind="core-flood"
               onEdit={onEdit}
               icpByResult={icpByResult}
+              segmentHref={segmentHref}
+              markedExperimentId={view?.explicit && multi ? view.segmentId : undefined}
             />
           </div>
         </Card>
       </section>
+
+      <section aria-labelledby="charts-heading">
+        <Card padding="none">
+          <CardHeader>
+            <h2 id="charts-heading" className={HEADING}>H₂ over time</h2>
+          </CardHeader>
+          <div className="p-4">
+            <H2Charts samples={run.samples} />
+          </div>
+        </Card>
+      </section>
+
+      {icpRows && icpRows.length > 0 && (
+        <Collapsible
+          title="ICP over time"
+          summary={`${icpRows.length} ${icpRows.length === 1 ? 'sample' : 'samples'}`}
+          defaultOpen
+        >
+          <IcpChart rows={icpRows} markers={segmentStarts(run.samples)} />
+        </Collapsible>
+      )}
 
       {side.length > 0 && (
         <Collapsible
@@ -129,35 +151,29 @@ export function CoreFloodRunPage() {
             variant
             onEdit={onEdit}
             icpByResult={icpByResult}
+            segmentHref={segmentHref}
           />
         </Collapsible>
       )}
 
-      {icpRows && icpRows.length > 0 && (
+      {multi && (
         <Collapsible
-          title="ICP over time"
-          summary={`${icpRows.length} ${icpRows.length === 1 ? 'sample' : 'samples'}`}
+          title="Segments"
+          summary={run.segments.length}
+          links={<>(<SegmentIdList ids={run.segments.map((s) => s.experiment_id)} hrefFor={segmentHref} />)</>}
+          open={segmentsOpen ?? true}
+          onOpenChange={setSegmentsOpen}
         >
-          <IcpChart rows={icpRows} markers={segmentStarts(run.samples)} />
+          <SegmentsTable
+            baseId={run.base_id}
+            segments={run.segments}
+            renaming={renaming}
+            setRenaming={setRenaming}
+            describing={describing}
+            setDescribing={setDescribing}
+          />
         </Collapsible>
       )}
-
-      <Collapsible
-        title="Segments"
-        summary={run.segments.length}
-        links={<>(<SegmentIdList ids={run.segments.map((s) => s.experiment_id)} />)</>}
-        open={segmentsOpen ?? run.segments.length > 1}
-        onOpenChange={setSegmentsOpen}
-      >
-        <SegmentsTable
-          baseId={run.base_id}
-          segments={run.segments}
-          renaming={renaming}
-          setRenaming={setRenaming}
-          describing={describing}
-          setDescribing={setDescribing}
-        />
-      </Collapsible>
 
       {run.warnings.length > 0 && (
         <Collapsible title="Data checks" summary={run.warnings.length}>
@@ -165,14 +181,8 @@ export function CoreFloodRunPage() {
             baseId={run.base_id}
             run={run}
             onEditSample={onEdit}
-            onRename={(id) => {
-              setSegmentsOpen(true)
-              setRenaming(id)
-            }}
-            onEditDescription={(id) => {
-              setSegmentsOpen(true)
-              setDescribing(id)
-            }}
+            onRename={editSegment(setRenaming)}
+            onEditDescription={editSegment(setDescribing)}
           />
         </Collapsible>
       )}
@@ -195,6 +205,37 @@ export function CoreFloodRunPage() {
           />
         </div>
       </Collapsible>
+    </div>
+  )
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <Breadcrumb items={[{ label: 'Core Floods', to: '/core-floods' }, { label: run.base_id, mono: true }]} />
+          {/* A single-segment run's record header is the page heading and carries the description. */}
+          <RunTitle run={run} description={description} recordHeader={recordHeader} />
+          <div className="flex flex-wrap items-center gap-2 text-xs text-ink-muted">
+            <span>Rig {rig ?? '—'}</span>
+            {ongoing.length > 0 && (
+              <Badge variant="ongoing">
+                Ongoing: <SegmentIdList ids={ongoing} inherit hrefFor={segmentHref} />
+              </Badge>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {exportId && <ExportAllButton experimentId={exportId} />}
+          <Button variant="primary" size="sm" onClick={() => setModal({})}>
+            + Add sample
+          </Button>
+        </div>
+      </div>
+
+      {view && multi && <SegmentPicker segments={run.segments} view={view} />}
+      {multi && recordHeader}
+
+      {view ? <RunTabs view={view} results={results} /> : results}
 
       <CoreFloodSampleModal
         open={modal !== null}

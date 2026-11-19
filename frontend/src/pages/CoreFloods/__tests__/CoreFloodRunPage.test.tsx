@@ -3,6 +3,8 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation, useNavigationType } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import type { ExperimentDetail } from '@/api/experiments'
+import type { ConditionsResponse } from '@/api/conditions'
 import type { CoreFloodRun, CoreFloodSample, CoreFloodSegment } from '@/api/coreFloods'
 import { ToastProvider } from '@/components/ui'
 
@@ -21,9 +23,10 @@ vi.mock('@/api/experiments', () => ({
     exportAll: vi.fn(),
     getDeleteImpact: vi.fn(),
     delete: vi.fn(),
+    getResults: vi.fn(),
   },
 }))
-vi.mock('@/api/conditions', () => ({ conditionsApi: { patch: vi.fn() } }))
+vi.mock('@/api/conditions', () => ({ conditionsApi: { patch: vi.fn(), getByExperiment: vi.fn() } }))
 
 import { coreFloodsApi } from '@/api/coreFloods'
 import { experimentsApi } from '@/api/experiments'
@@ -136,12 +139,54 @@ const RUN: CoreFloodRun = {
 }
 
 function Probe() {
+  const { pathname, search } = useLocation()
   return (
     <>
-      <div data-testid="path">{useLocation().pathname}</div>
+      <div data-testid="path">{pathname}</div>
+      <div data-testid="location">{pathname + search}</div>
       <div data-testid="nav-type">{useNavigationType()}</div>
     </>
   )
+}
+
+const currentLocation = () => screen.getByTestId('location').textContent ?? ''
+
+const detailOf = (id: string): ExperimentDetail => ({
+  id: 2,
+  experiment_id: id,
+  experiment_number: 20,
+  status: 'ONGOING',
+  researcher: null,
+  date: '2026-10-30T00:00:00',
+  sample_id: null,
+  base_experiment_id: 'CF_020',
+  parent_experiment_fk: 1,
+  replicate_label: null,
+  is_outlier: false,
+  id_timepoint_days: null,
+  created_at: '2026-10-30T00:00:00Z',
+  updated_at: null,
+  conditions: null,
+  notes: id === 'CF_020-2'
+    ? [{
+        id: 1, experiment_id: id, note_type: 'observation', note_text: 'note 1', result_id: null,
+        created_by: null, needs_review: false, created_at: '2026-10-31T00:00:00Z', updated_at: null,
+      }]
+    : [],
+  modifications: [],
+})
+
+const conditionsOf = (id: string): ConditionsResponse => ({
+  id: 1, experiment_fk: 1, experiment_id: id, experiment_type: 'Core Flood', reactor_number: 2,
+  reactor_slot: 'CF02', created_at: '2026-10-30T00:00:00',
+})
+
+/** The selected segment's record header and tabs read these two. */
+function mockSegmentQueries() {
+  vi.mocked(experimentsApi.get).mockReset()
+  vi.mocked(experimentsApi.get).mockImplementation(async (id: string) => detailOf(id))
+  vi.mocked(conditionsApi.getByExperiment).mockImplementation(async (id: string) => conditionsOf(id))
+  vi.mocked(experimentsApi.getResults).mockResolvedValue([])
 }
 
 function renderPage(path = '/core-floods/CF_020') {
@@ -162,6 +207,7 @@ function renderPage(path = '/core-floods/CF_020') {
 
 describe('CoreFloodRunPage', () => {
   beforeEach(() => {
+    mockSegmentQueries()
     vi.mocked(coreFloodsApi.get).mockReset()
     vi.mocked(coreFloodsApi.get).mockResolvedValue(RUN)
     vi.mocked(coreFloodsApi.icp).mockReset()
@@ -197,7 +243,7 @@ describe('CoreFloodRunPage', () => {
     // Issue #158: the ongoing segment is a link to its experiment page.
     const badge = screen.getByText(/^Ongoing:/)
     expect(badge).toHaveTextContent('Ongoing: CF_020-2')
-    expect(within(badge).getByRole('link', { name: 'CF_020-2' })).toHaveAttribute('href', '/experiments/CF_020-2')
+    expect(within(badge).getByRole('link', { name: 'CF_020-2' })).toHaveAttribute('href', '/core-floods/CF_020?segment=CF_020-2')
   })
 
   it('samples table comes before the other sections; Segments open for several segments', async () => {
@@ -233,7 +279,10 @@ describe('CoreFloodRunPage', () => {
     const header = seg.parentElement!
     expect(header).toHaveTextContent('3(CF_020, CF_020-2, CF_020-5_Bypass1)')
     const summaryLinks = within(header).getAllByRole('link').map((a) => a.getAttribute('href'))
-    expect(summaryLinks).toEqual(['/experiments/CF_020', '/experiments/CF_020-2', '/experiments/CF_020-5_Bypass1'])
+    expect(summaryLinks).toEqual([
+      '/core-floods/CF_020?segment=CF_020', '/core-floods/CF_020?segment=CF_020-2',
+      '/core-floods/CF_020?segment=CF_020-5_Bypass1',
+    ])
     // A summary link is outside the toggle: following it does not collapse the table.
     expect(within(seg).queryByRole('link')).toBeNull()
 
@@ -244,10 +293,11 @@ describe('CoreFloodRunPage', () => {
     expect(seg).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('a single-segment run starts with Segments closed', async () => {
+  it('a single-segment run has no Segments section', async () => {
     vi.mocked(coreFloodsApi.get).mockResolvedValue(withWarnings([], [segment({})]))
     renderPage()
-    expect(await screen.findByRole('button', { name: /^Segments/ })).toHaveAttribute('aria-expanded', 'false')
+    await screen.findByRole('region', { name: 'Samples' })
+    expect(screen.queryByRole('button', { name: /^Segments/ })).not.toBeInTheDocument()
   })
 
   it('a segment ID in the URL is replaced by the run base ID', async () => {
@@ -262,7 +312,7 @@ describe('CoreFloodRunPage', () => {
     await openSection(/^Side samples/)
     const side = await screen.findByRole('region', { name: 'Side samples' })
     const link = within(side).getByRole('link', { name: 'CF_020-5_Bypass1' })
-    expect(link).toHaveAttribute('href', '/experiments/CF_020-5_Bypass1')
+    expect(link).toHaveAttribute('href', '/core-floods/CF_020?segment=CF_020-5_Bypass1')
     await userEvent.click(link)
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
@@ -286,23 +336,6 @@ describe('CoreFloodRunPage', () => {
     await waitFor(() => expect(experimentsApi.delete).toHaveBeenCalledWith('CF_020-2'))
     await waitFor(() => expect(vi.mocked(coreFloodsApi.get).mock.calls.length).toBeGreaterThan(before))
     expect(screen.getByTestId('path')).toHaveTextContent(/^\/core-floods\/CF_020$/)
-  })
-
-  it('deleting the only segment lands on the run list', async () => {
-    vi.mocked(coreFloodsApi.get).mockResolvedValue(withWarnings([], [segment({})]))
-    vi.mocked(experimentsApi.getDeleteImpact).mockResolvedValue({
-      experiment_id: 'CF_020', conditions: 1, results: 0, scalar_results: 0, icp_results: 0,
-      result_files: 0, notes: 0, additives: 0, external_analyses: 0, xrd_phases: 0, total: 1,
-      background_for: [], h2_background_for: [], replicate_children: [],
-    })
-    vi.mocked(experimentsApi.delete).mockResolvedValue({ experiment_id: 'CF_020' } as never)
-    renderPage()
-    await openSection(/^Segments/)
-    await userEvent.click(await screen.findByRole('button', { name: 'Delete CF_020' }))
-    const dialog = await screen.findByRole('dialog')
-    await userEvent.type(await within(dialog).findByPlaceholderText('CF_020'), 'CF_020')
-    await userEvent.click(within(dialog).getByRole('button', { name: /^Delete/ }))
-    await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent(/^\/core-floods$/))
   })
 
   it('segments table has no pore volume column', async () => {
@@ -345,17 +378,16 @@ describe('CoreFloodRunPage', () => {
     expect(await screen.findByText('Second segment', { selector: 'p' })).toBeInTheDocument()
   })
 
-  it('editing a description from Data checks opens Segments', async () => {
-    // One segment, so Segments starts closed (issue #158).
+  it('editing a description from Data checks on a multi-segment run opens Segments', async () => {
     vi.mocked(coreFloodsApi.get).mockResolvedValue(
-      withWarnings([{ code: 'missing_description', experiment_ids: ['CF_020'] }], [segment({ description: null })]),
+      withWarnings([{ code: 'missing_description', experiment_ids: ['CF_020-2'] }]),
     )
-    vi.mocked(experimentsApi.get).mockResolvedValue({ notes: [] } as never)
     renderPage()
     const seg = await screen.findByRole('button', { name: /^Segments/ })
+    await userEvent.click(seg)
     expect(seg).toHaveAttribute('aria-expanded', 'false')
     await userEvent.click(screen.getByRole('button', { name: /^Data checks/ }))
-    await userEvent.click(screen.getByRole('button', { name: 'Describe CF_020' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Describe CF_020-2' }))
     expect(seg).toHaveAttribute('aria-expanded', 'true')
   })
 
@@ -388,8 +420,8 @@ describe('CoreFloodRunPage', () => {
     ])
     const { unmount } = renderPage()
     const btn = await screen.findByRole('button', { name: /^ICP over time/ })
-    // Issue #161 (NAV-14): collapsed with the count, as on the HPHT run page.
-    expect(btn).toHaveAttribute('aria-expanded', 'false')
+    // Issue #161 (NAV-14): the count in the summary; open by default, as on the HPHT run page.
+    expect(btn).toHaveAttribute('aria-expanded', 'true')
     expect(btn).toHaveTextContent(/1 sample$/)
     unmount()
     vi.mocked(coreFloodsApi.icp).mockResolvedValue([])
@@ -471,6 +503,7 @@ const withWarnings = (warnings: CoreFloodRun['warnings'], segments?: CoreFloodSe
 
 describe('CoreFloodRunPage segment edits and cleanup', () => {
   beforeEach(() => {
+    mockSegmentQueries()
     vi.mocked(coreFloodsApi.get).mockReset()
     vi.mocked(coreFloodsApi.get).mockResolvedValue(RUN)
     vi.mocked(coreFloodsApi.icp).mockReset()
@@ -529,14 +562,8 @@ describe('CoreFloodRunPage segment edits and cleanup', () => {
       base_experiment_id: 'CF_020',
     } as never)
     renderPage('/core-floods/CF_020_5')
-    await openSection(/^Segments/)
-    await userEvent.click(await screen.findByRole('button', { name: 'Rename CF_020_5_Brine' }))
-    const input = screen.getByLabelText('New experiment ID')
-    await userEvent.clear(input)
-    await userEvent.type(input, 'CF_020-5_Brine')
-    const save = screen.getByRole('button', { name: 'Save' })
-    await waitFor(() => expect(save).toBeEnabled())
-    await userEvent.click(save)
+    await waitFor(() => expect(document.getElementById('record-header')).not.toBeNull())
+    await renameTo('CF_020-5_Brine')
     await waitFor(() => expect(screen.getByTestId('path')).toHaveTextContent('/core-floods/CF_020'))
     expect(experimentsApi.patch).toHaveBeenCalledWith('CF_020_5_Brine', { experiment_id: 'CF_020-5_Brine' })
     await waitFor(() => expect(coreFloodsApi.get).toHaveBeenLastCalledWith('CF_020'))
@@ -617,7 +644,6 @@ describe('CoreFloodRunPage segment edits and cleanup', () => {
   })
 
   it('Describe then Cancel returns the cell to the description button', async () => {
-    vi.mocked(experimentsApi.get).mockResolvedValue({ notes: [] } as never)
     renderPage()
     await openSection(/^Segments/)
     await userEvent.click(await screen.findByRole('button', { name: 'Edit description of CF_020' }))
@@ -634,5 +660,173 @@ describe('CoreFloodRunPage segment edits and cleanup', () => {
     expect(await screen.findByText(/Could not load description: nope/)).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Close' }))
     expect(screen.getByRole('button', { name: 'Edit description of CF_020' })).toBeInTheDocument()
+  })
+})
+
+const ONE_SEGMENT: CoreFloodRun = withWarnings([], [RUN.segments[0]])
+
+/** Mounts the page at `path` and waits for the selected segment's record header. */
+async function renderRun(path: string, run: CoreFloodRun = RUN) {
+  vi.mocked(coreFloodsApi.get).mockImplementation(async () => run)
+  vi.mocked(coreFloodsApi.icp).mockResolvedValue([
+    { result_id: 11, experiment_id: 'CF_020-2', is_variant: false, sample_date: null,
+      cumulative_time_post_reaction_days: 5, elements: { fe: 12.4 } },
+  ])
+  renderPage(path)
+  await waitFor(() => expect(document.getElementById('record-header')).not.toBeNull())
+}
+
+async function deleteViaModal(id: string) {
+  vi.mocked(experimentsApi.getDeleteImpact).mockResolvedValue({
+    experiment_id: id, conditions: 1, results: 0, scalar_results: 0, icp_results: 0, result_files: 0,
+    notes: 0, additives: 0, external_analyses: 0, xrd_phases: 0, total: 1,
+    background_for: [], h2_background_for: [], replicate_children: [],
+  })
+  vi.mocked(experimentsApi.delete).mockResolvedValue({} as never)
+  await userEvent.click(screen.getByRole('button', { name: /delete experiment/i }))
+  const dialog = await screen.findByRole('dialog')
+  await userEvent.type(await within(dialog).findByLabelText(/type the experiment id/i), id)
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+}
+
+async function renameTo(newId: string) {
+  vi.mocked(experimentsApi.checkExists).mockResolvedValue({ exists: false })
+  await userEvent.click(screen.getByRole('button', { name: /rename experiment/i }))
+  const input = screen.getByRole('textbox')
+  await userEvent.clear(input)
+  await userEvent.type(input, newId)
+  const save = screen.getByRole('button', { name: 'Save' })
+  await waitFor(() => expect(save).toBeEnabled())
+  await userEvent.click(save)
+}
+
+const MAIN_SAMPLE_COUNT = 2
+const SEGMENT_2_SAMPLE_COUNT = 1
+
+describe('one page per run', () => {
+  beforeEach(() => {
+    vi.mocked(coreFloodsApi.get).mockReset()
+    vi.mocked(coreFloodsApi.icp).mockReset()
+    mockSegmentQueries()
+    vi.mocked(experimentsApi.patch).mockReset()
+  })
+
+  it('single-segment run: no picker, no Segments section, record header at h1', async () => {
+    await renderRun('/core-floods/CF_020', ONE_SEGMENT)
+    expect(screen.queryByRole('navigation', { name: 'Segments' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /segments/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'CF_020' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /rename experiment/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /delete experiment/i })).toBeInTheDocument()
+  })
+
+  it('multi-segment run: picker, run heading at h1, selected segment header at h2', async () => {
+    await renderRun('/core-floods/CF_020?segment=CF_020-2')
+    expect(screen.getByRole('navigation', { name: 'Segments' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'CF_020' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 2, name: 'CF_020-2' })).toBeInTheDocument()
+  })
+
+  it('marks the selected segment rows and shows the whole run', async () => {
+    await renderRun('/core-floods/CF_020?segment=CF_020-2')
+    const rows = screen.getAllByTestId(/^sample-/)
+    expect(rows.length).toBe(MAIN_SAMPLE_COUNT)
+    expect(rows.filter((r) => r.dataset.marked === 'true').length).toBe(SEGMENT_2_SAMPLE_COUNT)
+  })
+
+  it('only=1 narrows the table to the segment', async () => {
+    await renderRun('/core-floods/CF_020?segment=CF_020-2&only=1')
+    expect(screen.getAllByTestId(/^sample-/).length).toBe(SEGMENT_2_SAMPLE_COUNT)
+  })
+
+  it('the notes tab shows the selected segment notes, not the samples', async () => {
+    await renderRun('/core-floods/CF_020?segment=CF_020-2&tab=notes')
+    await waitFor(() => expect(experimentsApi.get).toHaveBeenCalledWith('CF_020-2'))
+    expect(screen.queryByRole('heading', { name: 'Samples' })).not.toBeInTheDocument()
+    expect(await screen.findByText('note 1')).toBeInTheDocument()
+  })
+
+  it('shows H₂ over time with no Fe²⁺ yield chart', async () => {
+    await renderRun('/core-floods/CF_020')
+    expect(screen.getByRole('heading', { name: /H₂ over time/i })).toBeInTheDocument()
+    expect(screen.getByRole('figure', { name: 'Cumulative H₂' })).toBeInTheDocument()
+    expect(screen.queryByRole('figure', { name: /Fe²⁺/ })).not.toBeInTheDocument()
+  })
+
+  it('opens ICP over time by default', async () => {
+    await renderRun('/core-floods/CF_020')
+    expect(await screen.findByRole('button', { name: /ICP over time/i })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('orders Results as Samples, H₂ over time, ICP over time, Side samples, Segments', async () => {
+    await renderRun('/core-floods/CF_020')
+    const icp = await screen.findByRole('button', { name: /ICP over time/i })
+    const order = [
+      screen.getByRole('heading', { name: 'Samples' }),
+      screen.getByRole('heading', { name: /H₂ over time/i }),
+      icp,
+      screen.getByRole('button', { name: /^Side samples/ }),
+      screen.getByRole('button', { name: /^Segments/ }),
+    ]
+    order.slice(1).forEach((el, i) =>
+      expect(order[i].compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy())
+  })
+
+  it('a segment ID in the path keeps the query and selects that segment', async () => {
+    await renderRun('/core-floods/CF_020-2?tab=notes')
+    await waitFor(() => expect(currentLocation()).toBe('/core-floods/CF_020?segment=CF_020-2&tab=notes'))
+  })
+
+  it('deleting the selected segment of a multi-segment run stays on the run', async () => {
+    await renderRun('/core-floods/CF_020?segment=CF_020-2')
+    await deleteViaModal('CF_020-2')
+    await waitFor(() => expect(currentLocation()).toBe('/core-floods/CF_020'))
+  })
+
+  it('never points at the deleted segment while the run refetches', async () => {
+    await renderRun('/core-floods/CF_020?segment=CF_020-2')
+    // Hold the post-delete run back, so the page lives on the cached run.
+    vi.mocked(coreFloodsApi.get).mockImplementation(() => new Promise<CoreFloodRun>(() => {}))
+    vi.mocked(experimentsApi.get).mockClear()
+    await deleteViaModal('CF_020-2')
+    await waitFor(() => expect(currentLocation()).toBe('/core-floods/CF_020'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await new Promise((r) => setTimeout(r, 20)) // the header's deferred cache eviction
+
+    expect(screen.queryByRole('link', { name: 'CF_020-2' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('sample-11')).not.toBeInTheDocument()
+    expect(experimentsApi.get).not.toHaveBeenCalledWith('CF_020-2')
+  })
+
+  it('deleting the only segment goes to the core flood list', async () => {
+    await renderRun('/core-floods/CF_020', ONE_SEGMENT)
+    await deleteViaModal('CF_020')
+    await waitFor(() => expect(currentLocation()).toBe('/core-floods'))
+  })
+
+  it('renaming the selected segment follows it to its new home', async () => {
+    vi.mocked(experimentsApi.patch).mockResolvedValue({
+      ...detailOf('CF_020-2'), experiment_id: 'CF_020-3', base_experiment_id: 'CF_020',
+    })
+    await renderRun('/core-floods/CF_020?segment=CF_020-2')
+    await renameTo('CF_020-3')
+    await waitFor(() => expect(currentLocation()).toBe('/core-floods/CF_020?segment=CF_020-3'))
+  })
+
+  it('Data checks edits on a single-segment run scroll the record header into view', async () => {
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    try {
+      await renderRun(
+        '/core-floods/CF_020',
+        withWarnings([{ code: 'missing_description', experiment_ids: ['CF_020'] }], [segment({ description: null })]),
+      )
+      await userEvent.click(await screen.findByRole('button', { name: /^Data checks/ }))
+      await userEvent.click(screen.getByRole('button', { name: 'Describe CF_020' }))
+      expect(scroll).toHaveBeenCalled()
+      expect(screen.queryByRole('button', { name: /^Segments/ })).not.toBeInTheDocument()
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    }
   })
 })

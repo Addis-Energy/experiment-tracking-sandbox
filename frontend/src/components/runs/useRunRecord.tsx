@@ -76,10 +76,13 @@ export function useRunRecord<R extends RunRecordRun>({ run, params, writes, type
     }, 0)
   }
   const onRenamed = (updated: ExperimentDetail) => {
-    navigate(
-      experimentHomePath(type, updated.experiment_id, updated.base_experiment_id ?? updated.experiment_id),
-      { replace: true },
-    )
+    const newBase = updated.base_experiment_id ?? updated.experiment_id
+    navigate(experimentHomePath(type, updated.experiment_id, newBase), { replace: true })
+    if (newBase !== run.base_id && run.segments.length === 1) {
+      // The run's only segment left it, so the old run is gone: refetching 404s.
+      void writes.invalidate(qc, newBase, [])
+      qc.removeQueries({ queryKey: writes.runQueryKey(run.base_id) })
+    }
     void writes.invalidate(qc, run.base_id, [segmentId])
   }
 
