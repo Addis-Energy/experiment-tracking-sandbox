@@ -938,8 +938,10 @@ describe('ExperimentListPage — one page per run (Task 8)', () => {
     expect(cell).toHaveAttribute('title', LONG)
     expect(cell.className).not.toContain('line-clamp')
     expect(cell.className).not.toContain('truncate')
+    expect(cell.className).not.toContain('whitespace-normal')
     expect(text).not.toBe(cell)
     expect(text.className).toContain('line-clamp-2')
+    expect(text.className).toContain('whitespace-normal')
   })
 
   it('an HPHT row opens its run with the segment selected, and the reactor is not a second link', async () => {
