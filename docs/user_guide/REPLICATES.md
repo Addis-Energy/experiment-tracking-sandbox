@@ -25,8 +25,8 @@ If one vial of a replicate set is re-run, name it by appending a sequential numb
 
 The Experiments list has a **Group replicates** toggle (on by default). When on:
 
-- Lettered sets collapse into a single row for the parent, with a `▸` disclosure arrow.
-- Click the arrow to expand and see each lettered member indented underneath.
+- Lettered sets collapse into a single row for the parent, with a **group · N** flag beside the ID.
+- Click the flag to expand and see each lettered member indented underneath (hover it to see the letters). Clicking the row or the ID opens the group page.
 - Pagination counts collapsed groups as one row, so page size and totals stay stable
   as you expand/collapse — expanding a row never changes what page you're on.
 - Turn the toggle off to see every experiment row flat, one per line, as before.
@@ -102,7 +102,7 @@ An experiment sampled destructively at several timepoints but **not** replicated
 experiment, four vials. It gets a group page like any set:
 
 - On `/experiments` the four vials appear as **one row labelled `SERUM_pH_002`** with a
-  **4 vials** chip. Clicking it opens the group page (not the first vial). The status
+  **group · 4 vials** badge. Clicking the row opens the group page (not the first vial). The status
   dropdown is read-only on that row, because an inline change would reach only one vial.
 - The group page header reads **4 vials** rather than "0 replicates", lists every vial
   with its `T+N` timepoint and result count, and links each one to its own page.

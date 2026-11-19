@@ -68,8 +68,7 @@ Shows all 19 reactor slots:
 
 Click any occupied reactor slot to open a detail panel showing all card fields in full, plus the experiment start date. Directly below the Experiment section (issue #157):
 
-- **Open run page** (the red, primary button) opens the run the card's experiment belongs to: `/hpht/{base}` for an R or P vessel, `/core-floods/{base}` for a CF rig, whatever the card's status (ongoing, queued or completed). It is missing only when the experiment has no base ID.
-- **Open segment {experiment ID}** opens that experiment's own detail page. It becomes the primary button when there is no run page.
+- **Open {experiment ID}** (the red, primary button) is the only destination. For an R, P or CF experiment it opens the run page (`/hpht/{base}` or `/core-floods/{base}`) with that experiment selected, whatever the card's status (ongoing, queued or completed); for any other experiment it opens the experiment's own detail page.
 - **Close** closes the panel.
 
 #### Reactor Modification box (issue #122 PR-B, 2026-09-24)
