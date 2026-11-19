@@ -27,7 +27,7 @@ beforeEach(() => {
 })
 
 describe('IcpSection (issue #143)', () => {
-  it('opens collapsed with the sample count, and shows the chart when opened (issue #161)', async () => {
+  it('opens expanded with the sample count and the chart, and collapses on click', async () => {
     const body: ExperimentIcp = {
       rows: [
         row({ result_id: 1, experiment_id: 'SERUM_010-t1' }),
@@ -39,15 +39,15 @@ describe('IcpSection (issue #143)', () => {
     wrap(<IcpSection experimentId="SERUM_010-t3" />)
     const toggle = await screen.findByRole('button', { name: /^ICP over time/ })
     expect(experimentsApi.getIcp).toHaveBeenCalledWith('SERUM_010-t3')
-    expect(toggle).toHaveAttribute('aria-expanded', 'false')
-    expect(toggle).toHaveTextContent('2 samples · 2 experiments in series')
-    expect(screen.queryByRole('button', { name: 'All' })).not.toBeInTheDocument()
-    await userEvent.click(toggle)
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(toggle).toHaveTextContent('2 samples · 2 experiments in series')
     expect(screen.getByRole('button', { name: 'All' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Log scale' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Ca' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: 'Cu' })).toHaveAttribute('aria-pressed', 'false')
+    await userEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('button', { name: 'All' })).not.toBeInTheDocument()
   })
 
   it('renders nothing when the series has no ICP data', async () => {

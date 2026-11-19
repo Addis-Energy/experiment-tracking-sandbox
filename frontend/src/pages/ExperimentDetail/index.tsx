@@ -1,11 +1,12 @@
-import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { useParams, Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { experimentsApi } from '@/api/experiments'
 import { conditionsApi } from '@/api/conditions'
 import { PageSpinner } from '@/components/ui'
+import { experimentHomePath } from '@/utils/experimentId'
 import { ExperimentBreadcrumb, GroupStrip } from '@/components/experiments/RunContextHeader'
 import { ExperimentRecordHeader } from '@/components/experiments/ExperimentRecordHeader'
-import { isInReplicateSet } from '@/components/experiments/runContext'
+import { isInReplicateSet, runKindFor } from '@/components/experiments/runContext'
 import { ConditionsTab } from './ConditionsTab'
 import { ResultsTab } from './ResultsTab'
 import { NotesTab } from './NotesTab'
@@ -13,7 +14,7 @@ import { ModificationsTab } from './ModificationsTab'
 import { AnalysisTab } from './AnalysisTab'
 
 // 'XRD' renders AnalysisTab (XRD phases and external analyses); relabelled in issue #143.
-const TABS = ['Conditions', 'Results', 'Notes', 'XRD', 'Entry Logs'] as const
+const TABS = ['Results', 'Conditions', 'Notes', 'XRD', 'Entry Logs'] as const
 type Tab = typeof TABS[number]
 
 /** `?tab=` values (issue #162). Links use these, e.g. SegmentLink's `tab`. */
@@ -25,10 +26,10 @@ const TAB_PARAM: Record<Tab, string> = {
   'Entry Logs': 'logs',
 }
 
-/** The tab named by `?tab=` (case-insensitive); Conditions when absent or unknown. */
+/** The tab named by `?tab=` (case-insensitive); Results when absent or unknown. */
 function tabFromParam(value: string | null): Tab {
   const wanted = value?.toLowerCase()
-  return TABS.find((t) => TAB_PARAM[t] === wanted) ?? 'Conditions'
+  return TABS.find((t) => TAB_PARAM[t] === wanted) ?? 'Results'
 }
 
 /** Full experiment detail page with tabbed navigation (Results, Conditions, XRD, Notes, Modifications). */
@@ -56,7 +57,7 @@ export function ExperimentDetailPage() {
     enabled: Boolean(id),
   })
 
-  const { data: conditions } = useQuery({
+  const { data: conditions, isLoading: conditionsLoading } = useQuery({
     queryKey: ['conditions', id],
     queryFn: () => conditionsApi.getByExperiment(id!),
     enabled: Boolean(id),
@@ -83,7 +84,19 @@ export function ExperimentDetailPage() {
     retry: false,
   })
 
-  if (isLoading) return <PageSpinner />
+  // A run segment lives on its run page. The run uses the run page's own key and
+  // fetch, so the redirect target renders from cache. A failed run falls back to
+  // this page.
+  const runKind = runKindFor(conditions?.experiment_type)
+  const runBaseId = experiment?.base_experiment_id ?? null
+  const { data: run, isLoading: runLoading } = useQuery({
+    queryKey: runKind && runBaseId ? runKind.writes.runQueryKey(runBaseId) : ['run-context', null],
+    queryFn: () => runKind!.fetch(runBaseId!),
+    enabled: Boolean(runKind && runBaseId),
+    retry: false,
+  })
+
+  if (isLoading || conditionsLoading || runLoading) return <PageSpinner />
   if (error || !experiment) {
     return (
       <div className="space-y-2 p-6">
@@ -93,6 +106,20 @@ export function ExperimentDetailPage() {
           Back to Experiments
         </Link>
       </div>
+    )
+  }
+
+  if (run?.segments.some((s) => s.experiment_id === experiment.experiment_id)) {
+    return (
+      <Navigate
+        replace
+        to={experimentHomePath(
+          conditions?.experiment_type,
+          experiment.experiment_id,
+          runBaseId,
+          searchParams.get('tab') ?? undefined,
+        )}
+      />
     )
   }
 

@@ -123,11 +123,21 @@ describe('experiment detail ?tab= (issue #162)', () => {
     ['?tab=xrd', 'XRD'],
     ['?tab=logs', 'Entry Logs'],
     ['?tab=conditions', 'Conditions'],
-    ['?tab=bogus', 'Conditions'],
-    ['', 'Conditions'],
+    ['?tab=bogus', 'Results'],
+    ['', 'Results'],
   ])('%s opens %s', async (query, tab) => {
     renderAt(`/experiments/SERUM_050${query}`)
     expect(await activeTab()).toEqual([tab])
+  })
+
+  it('lists the tabs in order: Results first', async () => {
+    renderAt('/experiments/SERUM_050')
+    await activeTab()
+    const labels = ['Results', 'Conditions', 'Notes', 'XRD', 'Entry Logs']
+    const buttons = screen.getAllByRole('button').map((b) => b.textContent ?? '')
+    const positions = labels.map((l) => buttons.findIndex((t) => t.startsWith(l)))
+    expect(positions.every((i) => i >= 0)).toBe(true)
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions)
   })
 
   it('opens the Results tab content for ?tab=results', async () => {

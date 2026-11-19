@@ -14,7 +14,7 @@ interface Props {
 
 /** ICP over time for the experiment's whole series (issue #143); hidden when
  *  the series has no ICP readings. Shares IcpChart with the run pages and, like
- *  them, opens collapsed with the sample count in the header (issue #161). */
+ *  them, opens expanded with the sample count in the header. */
 export function IcpSection({ experimentId, icp }: Props) {
   const { data: fetched } = useQuery({
     queryKey: ['experiment-icp', experimentId],
@@ -34,7 +34,7 @@ export function IcpSection({ experimentId, icp }: Props) {
     `${experiments} ${experiments === 1 ? 'experiment' : 'experiments'} in series`
   return (
     <div className="p-4 border-t border-surface-border">
-      <Collapsible title="ICP over time" summary={summary}>
+      <Collapsible title="ICP over time" summary={summary} defaultOpen>
         <IcpChart rows={data.rows} markers={markers} />
       </Collapsible>
     </div>

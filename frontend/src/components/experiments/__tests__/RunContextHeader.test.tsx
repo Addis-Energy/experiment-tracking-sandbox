@@ -30,8 +30,8 @@ import { ExperimentDetailPage } from '@/pages/ExperimentDetail'
 import { experimentsApi } from '@/api/experiments'
 import { conditionsApi } from '@/api/conditions'
 import { hphtApi } from '@/api/hpht'
+import { coreFloodsApi } from '@/api/coreFloods'
 import type { ExperimentDetail, ReplicateGroup } from '@/api/experiments'
-import type { RunSegment } from '@/api/runs'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, staleTime: 0 }, mutations: { retry: false } },
@@ -78,16 +78,11 @@ beforeEach(() => {
   vi.mocked(conditionsApi.getByExperiment).mockRejectedValue(new Error('none'))
   vi.mocked(experimentsApi.getReplicateGroup).mockRejectedValue(new Error('404'))
   vi.mocked(experimentsApi.getGroup).mockRejectedValue(new Error('404'))
+  // A run that loads and holds the segment redirects the detail page away, so the
+  // header cases reject the run: the page renders (its fallback).
+  vi.mocked(hphtApi.get).mockRejectedValue(new Error('404'))
+  vi.mocked(coreFloodsApi.get).mockRejectedValue(new Error('404'))
 })
-
-function segment(experiment_id: string, extra: Partial<RunSegment> = {}): RunSegment {
-  return {
-    id: experiment_id.length, experiment_id, status: 'COMPLETED', date: null,
-    parent_experiment_id: null, is_variant: false, description: null,
-    conditions_id: null, pore_volume_mL: null, rock_mass_g: null, reactor_slot: null,
-    ...extra,
-  }
-}
 
 /** A segment page whose conditions name the run type and reactor. */
 function mockSegmentPage(experimentId: string, baseId: string, experimentType: string) {
@@ -101,16 +96,6 @@ function mockSegmentPage(experimentId: string, baseId: string, experimentType: s
   vi.mocked(conditionsApi.getByExperiment).mockResolvedValue({
     experiment_type: experimentType, reactor_number: 7, reactor_slot: 'R07',
   } as never)
-}
-
-const HPHT_RUN = {
-  base_id: 'HPHT_297',
-  segments: [
-    segment('HPHT_297'),
-    segment('HPHT_297-2', { status: 'ONGOING', parent_experiment_id: 'HPHT_297' }),
-    segment('HPHT_297_Desorption', { parent_experiment_id: 'HPHT_297', is_variant: true }),
-  ],
-  conditions: null, samples: [], warnings: [],
 }
 
 const breadcrumb = () => screen.getByRole('navigation', { name: 'Breadcrumb' })
@@ -143,7 +128,6 @@ describe('detail header run context — issue #156', () => {
 
   it('changes status in place and refreshes the run and the dashboard', async () => {
     mockSegmentPage('HPHT_297-2', 'HPHT_297', 'HPHT')
-    vi.mocked(hphtApi.get).mockResolvedValue(HPHT_RUN as never)
     vi.mocked(experimentsApi.patchStatus).mockResolvedValue({} as never)
     const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
 
