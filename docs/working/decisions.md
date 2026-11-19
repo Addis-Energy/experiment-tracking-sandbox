@@ -936,3 +936,20 @@ Alembic `b8c4e2d7f9a1`; the 2026-09-08 entry above (dual-write).
 - **Ownership:** `experiments_app` owns the database and every object; default privileges are granted `FOR ROLE experiments_app`.
 
 **Why:** Tailscale access ends, and the team needs the app from any network (see `cloud-hosting-migration-decision` memory, 2026-11-12). Power BI is retired, so the views are read only by the app and by per-person psql logins.
+
+## 2026-11-19 — One page per HPHT / Core Flood run (`feat/segment-run-clarity`)
+
+**Decision (Mat, 2026-11-19):** an HPHT or Core Flood experiment has one page, its run page (`/hpht/{base}`, `/core-floods/{base}`). The segment detail page is no longer a destination for those types. When a specific segment is opened, the whole run is shown with that segment's rows marked. Design: `docs/superpowers/specs/2026-11-19-one-page-per-run-design.md`.
+
+**Contracts:**
+
+- **One path helper:** `experimentHomePath(type, experimentId, baseId, tab?)` in `frontend/src/utils/experimentId.ts` is where the destination of an experiment is spelled. Callers that know the type use it; callers that do not link to `/experiments/{id}` and rely on the redirect.
+- **URL state of a run page:** `?segment={experiment_id}&only=1&tab=results|conditions|notes|xrd|logs`, parsed and written only by `components/runs/runView.ts`. With no `segment` the selected segment is the first ONGOING non-variant, else the latest. `only` is ignored on a single-segment run and for a side sample.
+- **Redirect:** `/experiments/{id}` redirects (replace) to the run page only when the experiment's type has a run page and a run fetched after mount contains it. Otherwise the detail page renders, so no experiment becomes unreachable.
+- **Record header and tabs:** the run pages host the detail page's own header (`ExperimentRecordHeader`) and tab components for the selected segment, wired once in `components/runs/useRunRecord.tsx`. Both are keyed on the segment ID so an open editor never carries a draft to another segment.
+- **Deleting a segment** trims it from the cached run before navigating (`trimDeletedSegment` in `components/runs/runWrites.ts`); a deleted ID is never invalidated while a page still reads it.
+- **Single-segment runs** show no picker and no Segments section.
+
+**Why:** after the #154 navigation sweep users still could not tell the segment page from the run page: the two showed different columns, charts and default tabs, and which one opened depended on what was clicked. A run with one segment had both pages for what the user sees as one experiment.
+
+**Open:** the Experiments list Description column minimum is 16rem, not the spec's first-draft 20rem (an implementation ruling, to confirm with Mat).
