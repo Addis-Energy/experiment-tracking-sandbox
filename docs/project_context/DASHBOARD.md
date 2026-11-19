@@ -96,7 +96,7 @@ Horizontal bar chart showing up to 100 experiments sorted by most-recent start d
 
 - Bar **width** is proportional to experiment duration relative to the longest experiment shown
 - **Colors:** green = ONGOING, teal/blue = COMPLETED, grey = CANCELLED
-- Click any bar to navigate to that experiment's detail page
+- Click any bar to navigate to that experiment's detail page; an HPHT or Core Flood experiment opens its run page instead, with that experiment selected
 - Axis shows 0d / mid / max scale
 
 ### Filtering the Timeline

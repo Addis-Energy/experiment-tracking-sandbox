@@ -38,7 +38,7 @@ The run page becomes the only page for an HPHT or Core Flood experiment. `/exper
 **Layout, top to bottom:**
 
 1. Breadcrumb (`HPHT › HPHT_297`), run ID, run description, reactor, Ongoing badge, Export, + Add sample. Unchanged.
-2. **Segment picker**, only when the run has more than one segment: `Whole run · HPHT_297 · HPHT_297-2`, plus an "Only this segment's samples" toggle once a segment is picked. A single-segment run shows no picker and never uses the word "segment" in its header.
+2. **Segment picker**, only when the run has more than one segment: `Whole run · HPHT_297 · HPHT_297-2`, plus an "Only this segment's samples" toggle once a segment is picked. A single-segment run shows no picker and never uses the word "segment" in its header. A side sample (variant) can be picked; its row is marked in Side samples, and the only-toggle is not offered for it.
 3. **Record header** for the selected segment: ID with rename, status, description editor, start date, sample, reactor, Mark as background, Delete. This is the detail page's header, extracted and reused.
 4. **Tabs:** Results (default), Conditions, Notes, XRD, Entry Logs.
    - **Results** is run-level: conditions summary (HPHT), Samples table with ICP / MOD / DETAILS flags, **H₂ over time**, **ICP over time** (open by default), Side samples, Segments (multi-segment runs only), Data checks, Run totals (Core Flood).
@@ -62,7 +62,7 @@ The run page becomes the only page for an HPHT or Core Flood experiment. `/exper
 
 ### 3. Experiments list
 
-- **Description** wraps to two lines in a column of 20rem to 36rem, with the full text as the tooltip.
+- **Description** wraps to two lines in a column of 16rem to 36rem (20rem in the first draft; reduced during implementation so the table fits its container), with the full text as the tooltip.
 - The "▸ N replicates: a, b, c" button is removed. The **group flag** becomes the control: a button reading `group · 3` with `aria-expanded`, whose tooltip lists the letters and which shows the replicate rows in place. A letterless vial set, which has nothing to expand, shows a plain `group · 4 vials` badge.
 - Clicking the row or the ID of a group row still opens the group page.
 
