@@ -12,7 +12,7 @@ import { SegmentStatusSelect } from '@/components/runs/SegmentStatusSelect'
 import { latestSegment, ongoingIds, rootSegments, runDescription } from '@/components/runs/runSegments'
 import { SegmentsTable } from '@/pages/CoreFloods/SegmentsTable'
 import { ConditionsSummaryCard } from './ConditionsSummaryCard'
-import { HphtCharts } from './HphtCharts'
+import { H2Charts } from '@/components/runs/H2Charts'
 import { HphtSampleModal } from './HphtSampleModal'
 import { RunSamplesTable } from '@/components/results/RunSamplesTable'
 import { fromHpht } from '@/components/results/sampleRows'
@@ -162,7 +162,7 @@ export function HphtRunPage() {
             <h2 id="charts-heading" className={HEADING}>Run to date</h2>
           </CardHeader>
           <div className="p-4">
-            <HphtCharts samples={run.samples} />
+            <H2Charts samples={run.samples} />
           </div>
         </Card>
       </section>
