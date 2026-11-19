@@ -1,7 +1,7 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ToastProvider } from '@/components/ui'
 import type { ReactorCardData } from '@/api/dashboard'
@@ -14,7 +14,7 @@ vi.mock('@/api/experiments', () => ({
   },
 }))
 
-import { ReactorGrid, runPagePath } from '../ReactorGrid'
+import { ReactorGrid } from '../ReactorGrid'
 import { experimentsApi } from '@/api/experiments'
 
 function makeCard(overrides: Partial<ReactorCardData> = {}): ReactorCardData {
@@ -290,27 +290,10 @@ describe('ReactorGrid — Parr group (issue #147)', () => {
   })
 })
 
-describe('runPagePath — run page link (issues #150, #157)', () => {
-  it('links an ONGOING R or P card to its base ID, not its own segment ID', () => {
-    expect(runPagePath(makeCard({ experiment_id: 'HPHT_297-2', base_experiment_id: 'HPHT_297' })))
-      .toBe('/hpht/HPHT_297')
-    expect(runPagePath(makeCard({ reactor_label: 'P03', base_experiment_id: 'HPHT_310' })))
-      .toBe('/hpht/HPHT_310')
-  })
-
-  it('links CF cards to /core-floods/{base} and non-ONGOING cards to their run', () => {
-    expect(runPagePath(makeCard({
-      reactor_label: 'CF01', experiment_type: 'Core Flood', experiment_id: 'CF_018-3', base_experiment_id: 'CF_018',
-    }))).toBe('/core-floods/CF_018')
-    expect(runPagePath(makeCard({ status: 'QUEUED', base_experiment_id: 'HPHT_330' }))).toBe('/hpht/HPHT_330')
-    expect(runPagePath(makeCard({ status: 'COMPLETED' }))).toBe('/hpht/HPHT_MH_072')
-  })
-
-  it('gives no link without a base ID or for an unknown slot series', () => {
-    expect(runPagePath(makeCard({ base_experiment_id: null }))).toBeNull()
-    expect(runPagePath(makeCard({ reactor_label: 'X01' }))).toBeNull()
-  })
-})
+function LocationProbe() {
+  const { pathname, search } = useLocation()
+  return <p data-testid="probe">{pathname + search}</p>
+}
 
 describe('reactor detail modal — leads to the run (issue #157)', () => {
   const openModal = async (card: ReactorCardData) => {
@@ -321,19 +304,38 @@ describe('reactor detail modal — leads to the run (issue #157)', () => {
   const primaries = (dialog: HTMLElement) =>
     Array.from(dialog.querySelectorAll('button')).filter((b) => b.className.includes('bg-red-500'))
 
-  it('makes Open run page the only primary action, after Close and Open segment', async () => {
-    const dialog = await openModal(makeCard({ base_experiment_id: 'HPHT_MH_072' }))
-    const run = within(dialog).getByRole('button', { name: 'Open run page' })
-    const segment = within(dialog).getByRole('button', { name: 'Open segment HPHT_MH_072' })
-    expect(primaries(dialog)).toEqual([run])
-    expect(segment).not.toHaveClass('bg-red-500')
+  it('an occupied HPHT card offers one way in', async () => {
+    const dialog = await openModal(makeCard({ experiment_id: 'HPHT_297-2', base_experiment_id: 'HPHT_297' }))
+    const open = within(dialog).getByRole('button', { name: 'Open HPHT_297-2' })
+    expect(within(dialog).queryByRole('button', { name: /open run page|open segment/i })).toBeNull()
     expect(within(dialog).queryByRole('button', { name: /view detail/i })).toBeNull()
+    expect(primaries(dialog)).toEqual([open])
 
-    // Footer order: Close, Open segment, Open run page (primary last).
-    const footer = run.parentElement!
-    expect(Array.from(footer.querySelectorAll('button')).map((b) => b.textContent)).toEqual([
-      'Close', 'Open segment HPHT_MH_072', 'Open run page',
+    // Footer order: Close, then the single way in.
+    expect(Array.from(open.parentElement!.querySelectorAll('button')).map((b) => b.textContent)).toEqual([
+      'Close', 'Open HPHT_297-2',
     ])
+  })
+
+  it('opens the run with the segment selected', async () => {
+    const card = makeCard({ experiment_id: 'HPHT_297-2', base_experiment_id: 'HPHT_297' })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <Routes>
+              <Route path="/" element={<ReactorGrid cards={[card]} rSlotCount={16} cfSlotCount={3} />} />
+              <Route path="/hpht/:baseId" element={<LocationProbe />} />
+            </Routes>
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByText('HPHT_297-2'))
+    const dialog = await screen.findByRole('dialog', { name: 'R05 HPHT_297-2' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Open HPHT_297-2' }))
+    expect(await screen.findByTestId('probe')).toHaveTextContent('/hpht/HPHT_297?segment=HPHT_297-2')
   })
 
   it('offers the Core Flood run for a CF card and navigates to it', async () => {
@@ -356,19 +358,18 @@ describe('reactor detail modal — leads to the run (issue #157)', () => {
     )
     fireEvent.click(screen.getByText('CF_018-3'))
     const dialog = await screen.findByRole('dialog', { name: 'CF01 CF_018-3' })
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Open run page' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Open CF_018-3' }))
     expect(await screen.findByText('core flood run page')).toBeInTheDocument()
   })
 
-  it('makes Open segment primary when the card has no run', async () => {
+  it('goes to the experiment page when the card has no run', async () => {
     const dialog = await openModal(makeCard({ base_experiment_id: null }))
-    expect(within(dialog).queryByRole('button', { name: 'Open run page' })).toBeNull()
-    expect(primaries(dialog)).toEqual([within(dialog).getByRole('button', { name: 'Open segment HPHT_MH_072' })])
+    expect(primaries(dialog)).toEqual([within(dialog).getByRole('button', { name: 'Open HPHT_MH_072' })])
   })
 
   it('puts the run actions above the modification note, whose Save is never primary', async () => {
     const dialog = await openModal(makeCard())
-    const run = within(dialog).getByRole('button', { name: 'Open run page' })
+    const run = within(dialog).getByRole('button', { name: 'Open HPHT_MH_072' })
     const heading = within(dialog).getByText('Log a reactor modification note')
     // The footer precedes the note section in document order.
     expect(run.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()

@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { ToastProvider } from '@/components/ui'
 
 vi.mock('@/api/experiments', () => ({
@@ -240,7 +240,8 @@ describe('ExperimentListPage — replicate grouping', () => {
     render(<ExperimentListPage />, { wrapper })
     await waitFor(() => expect(screen.getByText('SERUM_001')).toBeInTheDocument())
     expect(vi.mocked(experimentsApi.list).mock.calls.at(-1)![0]?.group_replicates).toBe(true)
-    expect(screen.getByText('3 replicates: a, b, c')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show replicates of SERUM_001' }))
+      .toHaveAttribute('title', '3 replicates: a, b, c')
     expect(screen.queryByText('SERUM_001a')).not.toBeInTheDocument()
   })
 
@@ -248,7 +249,7 @@ describe('ExperimentListPage — replicate grouping', () => {
     const user = userEvent.setup()
     render(<ExperimentListPage />, { wrapper })
     await waitFor(() => expect(screen.getByText('SERUM_001')).toBeInTheDocument())
-    await user.click(screen.getByRole('button', { name: /expand replicates/i }))
+    await user.click(screen.getByRole('button', { name: 'Show replicates of SERUM_001' }))
     expect(screen.getByText('SERUM_001a')).toBeInTheDocument()
     expect(screen.getByText('SERUM_001c')).toBeInTheDocument()
   })
@@ -340,14 +341,15 @@ describe('ExperimentListPage — issue #98: group rows', () => {
   it('badge counts distinct letters, not sibling rows', async () => {
     render(<ExperimentListPage />, { wrapper })
     await waitFor(() => expect(screen.getByText('SERUM_001')).toBeInTheDocument())
-    expect(screen.getByText('2 replicates: a, b')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show replicates of SERUM_001' }))
+      .toHaveAttribute('title', '2 replicates: a, b')
   })
 
   it('expands to one row per letter, still with no -t token', async () => {
     const user = userEvent.setup()
     const { container } = render(<ExperimentListPage />, { wrapper })
     await waitFor(() => expect(screen.getByText('SERUM_001')).toBeInTheDocument())
-    await user.click(screen.getByRole('button', { name: /expand replicates/i }))
+    await user.click(screen.getByRole('button', { name: 'Show replicates of SERUM_001' }))
     expect(screen.getByText('SERUM_001a')).toBeInTheDocument()
     expect(screen.getByText('SERUM_001b')).toBeInTheDocument()
     expect(container.textContent).not.toMatch(/-t\d/)
@@ -552,7 +554,7 @@ describe('ExperimentListPage — issue #101: letterless timepoint vial rows', ()
     render(<ExperimentListPage />, { wrapper })
 
     await waitFor(() => expect(screen.getByText('SERUM_pH_002')).toBeInTheDocument())
-    expect(screen.getByText('4 vials')).toBeInTheDocument()
+    expect(screen.getByText('group · 4 vials')).toBeInTheDocument()
     // No letters exist, so it must not claim replicates.
     expect(screen.queryByText(/replicates:/)).not.toBeInTheDocument()
   })
@@ -598,6 +600,11 @@ describe('ExperimentListPage — issue #101: letterless timepoint vial rows', ()
 function GroupRouteProbe() {
   const { baseId } = useParams()
   return <div data-testid="group-route">{baseId}</div>
+}
+
+function HphtRouteProbe() {
+  const { search } = useLocation()
+  return <p data-testid="hpht-route">{search}</p>
 }
 
 function DetailRouteProbe() {
@@ -670,7 +677,8 @@ describe('ExperimentListPage — run links and group cues (issue #159)', () => {
               <Route path="/experiments" element={<ExperimentListPage />} />
               <Route path="/experiments/groups/:baseId" element={<GroupRouteProbe />} />
               <Route path="/experiments/:id" element={<DetailRouteProbe />} />
-              <Route path="/hpht/:baseId" element={<p data-testid="hpht-route">hpht</p>} />
+              <Route path="/hpht/:baseId" element={<HphtRouteProbe />} />
+              <Route path="/core-floods/:baseId" element={<HphtRouteProbe />} />
             </Routes>
           </ToastProvider>
         </QueryClientProvider>
@@ -680,7 +688,7 @@ describe('ExperimentListPage — run links and group cues (issue #159)', () => {
 
   afterEach(() => { vi.clearAllMocks() })
 
-  it('links HPHT and core flood reactor cells to their runs; serum stays text', async () => {
+  it('shows the reactor as plain text, never a second link', async () => {
     vi.mocked(experimentsApi.list).mockResolvedValue({
       items: [
         row({}),
@@ -692,21 +700,22 @@ describe('ExperimentListPage — run links and group cues (issue #159)', () => {
       total: 3, skip: 0, limit: 25,
     })
     render(<ExperimentListPage />, { wrapper })
-    const hpht = await screen.findByRole('link', { name: '7' })
-    expect(hpht).toHaveAttribute('href', '/hpht/HPHT_297')
-    expect(hpht).toHaveAttribute('title', 'Open run HPHT_297')
-    expect(screen.getByRole('link', { name: '2' })).toHaveAttribute('href', '/core-floods/CF_018')
-    expect(screen.queryByRole('link', { name: '5' })).toBeNull()
+    expect(await screen.findByText('7')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: '7' })).toBeNull()
+    expect(screen.queryByRole('link', { name: '2' })).toBeNull()
     expect(screen.getByText('5')).toBeInTheDocument()
   })
 
-  it('opens the run, not the row, from the reactor link', async () => {
-    vi.mocked(experimentsApi.list).mockResolvedValue({ items: [row({})], total: 1, skip: 0, limit: 25 })
+  it('opens the run with the segment selected from a core flood row', async () => {
+    vi.mocked(experimentsApi.list).mockResolvedValue({
+      items: [row({ experiment_id: 'CF_018-3', experiment_type: 'Core Flood', reactor_number: 2,
+                    base_experiment_id: 'CF_018' })],
+      total: 1, skip: 0, limit: 25,
+    })
     const user = userEvent.setup()
     renderWithRunRoutes()
-    await user.click(await screen.findByRole('link', { name: '7' }))
-    expect(await screen.findByTestId('hpht-route')).toBeInTheDocument()
-    expect(screen.queryByTestId('detail-route')).not.toBeInTheDocument()
+    await user.click(await screen.findByText('CF_018-3'))
+    expect(await screen.findByTestId('hpht-route')).toHaveTextContent('?segment=CF_018-3')
   })
 
   it('marks a group row: linked ID, "group" badge, titled expander', async () => {
@@ -725,7 +734,8 @@ describe('ExperimentListPage — run links and group cues (issue #159)', () => {
     expect(id).toHaveAttribute('href', '/experiments/groups/SERUM_001')
     expect(id).toHaveAttribute('title', 'Open group page')
     expect(id.closest('td')).toHaveTextContent('group')
-    expect(screen.getByRole('button', { name: 'Expand replicates' })).toHaveAttribute('title', 'Show replicates here')
+    expect(screen.getByRole('button', { name: 'Show replicates of SERUM_001' }))
+      .toHaveAttribute('title', '2 replicates: a, b')
   })
 
   it('leaves a plain row ID unlinked and unbadged', async () => {
@@ -846,9 +856,9 @@ describe('ExperimentListPage — reactor labels', () => {
       total: 2, skip: 0, limit: 25,
     })
     render(<ExperimentListPage />, { wrapper })
-    const parr = await screen.findByRole('link', { name: 'P03' })
-    expect(parr).toHaveAttribute('href', '/hpht/HPHT_300')
-    expect(screen.queryByRole('link', { name: '3' })).toBeNull()
+    expect(await screen.findByText('P03')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'P03' })).toBeNull()
+    expect(screen.queryByText('3')).toBeNull()
     expect(screen.getByText('5')).toBeInTheDocument()
   })
 
@@ -865,5 +875,76 @@ describe('ExperimentListPage — reactor labels', () => {
     await userEvent.type(box, '3')
     await waitFor(() => expect(last()?.reactor).toBe('P3'))
     expect(last()).not.toHaveProperty('reactor_number')
+  })
+})
+
+describe('ExperimentListPage — one page per run (Task 8)', () => {
+  const LONG = 'Pyrite + Cu catalyst at 90 C in brine, second pass after the stir shaft swap and a fresh seal'
+  const plain = (over: Partial<ExperimentListItem>): ExperimentListItem => ({
+    id: 1, experiment_id: 'SERUM_050', experiment_number: 50, status: 'ONGOING',
+    researcher: null, date: null, sample_id: null, created_at: '2026-07-01T00:00:00Z',
+    experiment_type: 'Serum', reactor_number: null, additives_summary: null, description: null,
+    base_experiment_id: null, parent_experiment_fk: null, replicate_label: null,
+    is_outlier: false, id_timepoint_days: null, ...over,
+  })
+  const VIAL_SET_ROW = plain({
+    id: 2, experiment_id: 'SERUM_pH_002-t1', experiment_number: 100,
+    base_experiment_id: 'SERUM_pH_002', group_display_id: 'SERUM_pH_002', vial_count: 4,
+    id_timepoint_days: 1,
+  })
+
+  function renderList(items: ExperimentListItem[]) {
+    vi.mocked(experimentsApi.list).mockResolvedValue({ items, total: items.length, skip: 0, limit: 25 })
+    return render(
+      <MemoryRouter initialEntries={['/experiments']}>
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <Routes>
+              <Route path="/experiments" element={<ExperimentListPage />} />
+              <Route path="/experiments/groups/:baseId" element={<GroupRouteProbe />} />
+              <Route path="/hpht/:baseId" element={<HphtRouteProbe />} />
+            </Routes>
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    )
+  }
+  afterEach(() => { vi.clearAllMocks() })
+
+  it('the group flag expands the replicates; no replicates button remains', async () => {
+    const user = userEvent.setup()
+    renderList([makeGroupedItem()])
+    const flag = await screen.findByRole('button', { name: 'Show replicates of SERUM_001' })
+    expect(flag).toHaveTextContent(/group · 3/i)
+    expect(flag).toHaveAttribute('title', '3 replicates: a, b, c')
+    expect(flag).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText(/replicates:/)).not.toBeInTheDocument()
+    await user.click(flag)
+    expect(flag).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('SERUM_001a')).toBeInTheDocument()
+    expect(screen.queryByTestId('group-route')).not.toBeInTheDocument()
+  })
+
+  it('a letterless vial set shows a plain flag with the vial count', async () => {
+    renderList([VIAL_SET_ROW])
+    expect(await screen.findByText(/group · 4 vials/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /show replicates/i })).not.toBeInTheDocument()
+  })
+
+  it('the description wraps to two lines and carries the full text as its title', async () => {
+    renderList([plain({ description: LONG })])
+    const cell = (await screen.findByText(LONG)).closest('td')!
+    expect(cell).toHaveAttribute('title', LONG)
+    expect(cell.className).toContain('line-clamp-2')
+    expect(cell.className).not.toContain('truncate')
+  })
+
+  it('an HPHT row opens its run with the segment selected, and the reactor is not a second link', async () => {
+    const user = userEvent.setup()
+    renderList([plain({ experiment_id: 'HPHT_297-2', base_experiment_id: 'HPHT_297',
+                        experiment_type: 'HPHT', reactor_number: 9, reactor_slot: 'R09' })])
+    expect(screen.queryByRole('link', { name: 'R09' })).not.toBeInTheDocument()
+    await user.click(await screen.findByText('HPHT_297-2'))
+    expect(await screen.findByTestId('hpht-route')).toHaveTextContent('?segment=HPHT_297-2')
   })
 })

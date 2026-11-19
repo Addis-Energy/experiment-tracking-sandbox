@@ -5,7 +5,7 @@ import { Button, Card, Num, useToast } from '@/components/ui'
 import type { ReactorCardData, ReactorSpec } from '@/api/dashboard'
 import { experimentsApi, type ExperimentStatus } from '@/api/experiments'
 import { labTodayISO } from '@/utils/labDate'
-import { runPathFor } from '@/utils/experimentId'
+import { experimentHomePath } from '@/utils/experimentId'
 
 const STATUS_OPTIONS = ['ONGOING', 'COMPLETED', 'CANCELLED', 'QUEUED'] as const
 type _ExperimentStatus = typeof STATUS_OPTIONS[number]
@@ -38,20 +38,6 @@ export function formatDateShort(iso: string): string {
 
 function isCoreFlood(label: string): boolean {
   return label.startsWith('CF')
-}
-
-/** Run type a slot series holds: CF rigs run core floods, R and P (#147) vessels run HPHT. */
-function runTypeForLabel(label: string): 'HPHT' | 'Core Flood' | null {
-  if (isCoreFlood(label)) return 'Core Flood'
-  if (/^[RP]\d/.test(label)) return 'HPHT'
-  return null
-}
-
-/** Run page of a card's experiment, whatever its status (issues #150, #157);
- *  null when the card has no base ID or the slot series has no run page. */
-export function runPagePath(card: ReactorCardData): string | null {
-  const type = runTypeForLabel(card.reactor_label)
-  return type && card.base_experiment_id ? runPathFor(type, card.base_experiment_id) : null
 }
 
 function StatusBadge({
@@ -346,8 +332,6 @@ function ReactorDetailModal({
     else setEditingDate(false)
   }
 
-  const runPath = runPagePath(card)
-
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
@@ -477,24 +461,21 @@ function ReactorDetailModal({
           </dl>
         </div>
 
-        {/* Navigation (issue #157): the run is the primary destination, and sits
-            above the modification note so the note reads as a side task. */}
+        {/* Navigation: one way in. HPHT and Core Flood go to the run page with
+            this segment selected; other types go to the experiment page. */}
         <div className="flex justify-end gap-2 pt-3 pb-4 border-t border-surface-border">
           <Button variant="ghost" size="sm" onClick={onClose}>
             Close
           </Button>
           <Button
-            variant={runPath ? 'secondary' : 'primary'}
+            variant="primary"
             size="sm"
-            onClick={() => navigate(`/experiments/${encodeURIComponent(card.experiment_id ?? '')}`)}
+            onClick={() =>
+              navigate(experimentHomePath(card.experiment_type, card.experiment_id ?? '', card.base_experiment_id))
+            }
           >
-            Open segment {card.experiment_id}
+            Open {card.experiment_id}
           </Button>
-          {runPath && (
-            <Button variant="primary" size="sm" onClick={() => navigate(runPath)}>
-              Open run page
-            </Button>
-          )}
         </div>
 
         {/* HARDWARE section */}
