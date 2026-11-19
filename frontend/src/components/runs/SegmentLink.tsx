@@ -19,6 +19,9 @@ interface SegmentLinkProps {
   stopPropagation?: boolean
   /** Tooltip, for a link whose text is not the ID (e.g. a result count). */
   title?: string
+  /** Where the link goes in place of the experiment's detail page, e.g. `?segment=X`
+   *  to select a segment on a run page. */
+  to?: string
 }
 
 const ID_LINK = 'text-red-400 hover:text-red-300'
@@ -36,8 +39,9 @@ export function SegmentLink({
   className,
   stopPropagation = true,
   title,
+  to: toOverride,
 }: SegmentLinkProps) {
-  const to = `/experiments/${encodeURIComponent(id)}${tab ? `?tab=${encodeURIComponent(tab)}` : ''}`
+  const to = toOverride ?? `/experiments/${encodeURIComponent(id)}${tab ? `?tab=${encodeURIComponent(tab)}` : ''}`
   const onClick = stopPropagation ? (e: MouseEvent) => e.stopPropagation() : undefined
   return (
     <Link

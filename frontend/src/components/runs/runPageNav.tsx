@@ -5,13 +5,15 @@ import { SegmentLink } from './SegmentLink'
 import type { RunWrites } from './runWrites'
 
 /** Experiment IDs as links, comma separated (issue #158). */
-export function SegmentIdList({ ids, inherit = false }: { ids: string[]; inherit?: boolean }) {
+export function SegmentIdList({
+  ids, inherit = false, hrefFor,
+}: { ids: string[]; inherit?: boolean; hrefFor?: (id: string) => string }) {
   return (
     <>
       {ids.map((id, i) => (
         <Fragment key={id}>
           {i > 0 && ', '}
-          <SegmentLink id={id} inherit={inherit} />
+          <SegmentLink id={id} inherit={inherit} to={hrefFor?.(id)} />
         </Fragment>
       ))}
     </>

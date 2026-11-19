@@ -266,6 +266,32 @@ describe('RunSamplesTable — cells', () => {
   })
 })
 
+describe('RunSamplesTable — segment selection', () => {
+  const SEG_2_ROW = hp({ result_id: 2, experiment_id: 'HPHT_297-2' })
+  const ROOT_ROW = hp({ result_id: 1, experiment_id: 'HPHT_297' })
+  const renderTable = (props: Partial<React.ComponentProps<typeof RunSamplesTable>>) =>
+    render(
+      <RunSamplesTable
+        rows={[fromHpht(SEG_2_ROW), fromHpht(ROOT_ROW)]} scope="run" kind="hpht" icpByResult={noIcp} {...props}
+      />,
+    )
+
+  it('links the Segment column through segmentHref and marks the selected segment rows', () => {
+    renderTable({ segmentHref: (id) => `?segment=${id}`, markedExperimentId: 'HPHT_297-2' })
+    expect(screen.getAllByRole('link', { name: 'HPHT_297-2' })[0]).toHaveAttribute('href', expect.stringContaining('segment=HPHT_297-2'))
+    expect(screen.getByTestId(`sample-${SEG_2_ROW.result_id}`)).toHaveAttribute('data-marked', 'true')
+    expect(screen.getByTestId(`sample-${ROOT_ROW.result_id}`)).not.toHaveAttribute('data-marked')
+    expect(within(screen.getByTestId(`sample-${SEG_2_ROW.result_id}`)).getAllByRole('cell')[0].className)
+      .toMatch(/border-l-2 border-brand-red/)
+  })
+
+  it('without the new props links the detail page and marks nothing', () => {
+    renderTable({})
+    expect(screen.getByRole('link', { name: 'HPHT_297-2' })).toHaveAttribute('href', '/experiments/HPHT_297-2')
+    expect(screen.getByTestId(`sample-${SEG_2_ROW.result_id}`)).not.toHaveAttribute('data-marked')
+  })
+})
+
 describe('RunSamplesTable — one interaction model (issue #163)', () => {
   it('row click and Enter edit, handing back the page row', async () => {
     const onEdit = vi.fn()
