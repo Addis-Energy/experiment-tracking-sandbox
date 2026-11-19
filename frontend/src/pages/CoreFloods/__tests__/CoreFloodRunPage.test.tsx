@@ -813,6 +813,65 @@ describe('one page per run', () => {
     await waitFor(() => expect(currentLocation()).toBe('/core-floods/CF_020?segment=CF_020-3'))
   })
 
+  it('F4: deleting the selected segment from the Segments table never points at it', async () => {
+    await renderRun('/core-floods/CF_020?segment=CF_020-2')
+    vi.mocked(experimentsApi.getDeleteImpact).mockResolvedValue({
+      experiment_id: 'CF_020-2', conditions: 1, results: 0, scalar_results: 0, icp_results: 0, result_files: 0,
+      notes: 0, additives: 0, external_analyses: 0, xrd_phases: 0, total: 1,
+      background_for: [], h2_background_for: [], replicate_children: [],
+    })
+    vi.mocked(experimentsApi.delete).mockResolvedValue({} as never)
+    // Hold the post-delete run back, so the page lives on the cached run.
+    vi.mocked(coreFloodsApi.get).mockImplementation(() => new Promise<CoreFloodRun>(() => {}))
+    vi.mocked(experimentsApi.get).mockClear()
+    const segments = screen.getByRole('region', { name: 'Segments' })
+    await userEvent.click(within(segments).getByRole('button', { name: 'Delete CF_020-2' }))
+    const dialog = await screen.findByRole('dialog')
+    await userEvent.type(await within(dialog).findByPlaceholderText('CF_020-2'), 'CF_020-2')
+    await userEvent.click(within(dialog).getByRole('button', { name: /^Delete/ }))
+    await waitFor(() => expect(currentLocation()).toBe('/core-floods/CF_020'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await new Promise((r) => setTimeout(r, 20))
+
+    expect(screen.queryByRole('link', { name: 'CF_020-2' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('sample-11')).not.toBeInTheDocument()
+    expect(experimentsApi.get).not.toHaveBeenCalledWith('CF_020-2')
+  })
+
+  it('F4: renaming the selected segment from the Segments table follows it in the URL', async () => {
+    const renamed: CoreFloodRun = {
+      ...RUN,
+      segments: RUN.segments.map((s) => (s.id === 2 ? { ...s, experiment_id: 'CF_020-3' } : s)),
+      samples: RUN.samples.map((s) => (s.experiment_id === 'CF_020-2' ? { ...s, experiment_id: 'CF_020-3' } : s)),
+    }
+    await renderRun('/core-floods/CF_020?segment=CF_020-2')
+    vi.mocked(experimentsApi.checkExists).mockResolvedValue({ exists: false })
+    vi.mocked(experimentsApi.patch).mockImplementation(async () => {
+      vi.mocked(coreFloodsApi.get).mockImplementation(async () => renamed)
+      return { ...detailOf('CF_020-3'), base_experiment_id: 'CF_020' }
+    })
+    const segments = screen.getByRole('region', { name: 'Segments' })
+    await userEvent.click(within(segments).getByRole('button', { name: 'Rename CF_020-2' }))
+    const input = screen.getByLabelText('New experiment ID')
+    await userEvent.clear(input)
+    await userEvent.type(input, 'CF_020-3')
+    const save = screen.getByRole('button', { name: 'Save' })
+    await waitFor(() => expect(save).toBeEnabled())
+    vi.mocked(experimentsApi.get).mockClear()
+    await userEvent.click(save)
+    await waitFor(() => expect(currentLocation()).toBe('/core-floods/CF_020?segment=CF_020-3'))
+    expect(await screen.findByRole('heading', { level: 2, name: 'CF_020-3' })).toBeInTheDocument()
+    expect(experimentsApi.get).not.toHaveBeenCalledWith('CF_020-2')
+  })
+
+  it('F5: a Segments table ID selects the segment on this page', async () => {
+    await renderRun('/core-floods/CF_020')
+    const segments = screen.getByRole('region', { name: 'Segments' })
+    const href = within(segments).getByRole('link', { name: 'CF_020-2' }).getAttribute('href') ?? ''
+    expect(href).toContain('segment=CF_020-2')
+    expect(href).not.toContain('/experiments/')
+  })
+
   it('Data checks edits on a single-segment run scroll the record header into view', async () => {
     const scroll = vi.fn()
     Element.prototype.scrollIntoView = scroll

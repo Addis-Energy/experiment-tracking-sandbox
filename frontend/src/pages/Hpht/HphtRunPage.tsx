@@ -10,7 +10,7 @@ import { Collapsible } from '@/components/runs/Collapsible'
 import { RunNotFound, SegmentIdList, useCanonicalRunUrl } from '@/components/runs/runPageNav'
 import { RunTabs } from '@/components/runs/RunTabs'
 import { SegmentPicker } from '@/components/runs/SegmentPicker'
-import { runViewSearch } from '@/components/runs/runView'
+import { runViewSearch, sampleMarks } from '@/components/runs/runView'
 import { RunTitle, useRunRecord } from '@/components/runs/useRunRecord'
 import { SegmentStatusSelect } from '@/components/runs/SegmentStatusSelect'
 import { latestSegment, ongoingIds, rootSegments, runDescription } from '@/components/runs/runSegments'
@@ -19,6 +19,7 @@ import { ConditionsSummaryCard } from './ConditionsSummaryCard'
 import { H2Charts } from '@/components/runs/H2Charts'
 import { HphtSampleModal } from './HphtSampleModal'
 import { RunSamplesTable } from '@/components/results/RunSamplesTable'
+import { scalarDetails } from '@/components/results/ScalarExtras'
 import { fromHpht } from '@/components/results/sampleRows'
 import { HPHT_WRITES, invalidateHphtWrites } from './hphtWrites'
 
@@ -33,17 +34,26 @@ function WarningLine({ run, warning }: { run: HphtRun; warning: HphtWarning }) {
   const qc = useQueryClient()
   const ids = warning.experiment_ids
   const joined = ids.join(', ')
+  // The Segments section exists only on a multi-segment run; a single segment is
+  // edited in the record header at the top of the page.
+  const multi = run.segments.length > 1
   switch (warning.code) {
     case 'multiple_roots':
       return <p>Several segments have no parent: <span className={MONO}>{joined}</span>. Rename the extra roots into this run&apos;s sequence (Segments).</p>
     case 'missing_description':
-      return <p>No description on <span className={MONO}>{joined}</span>. Add one in Segments.</p>
+      return (
+        <p>
+          No description on <span className={MONO}>{joined}</span>.{' '}
+          {multi ? 'Add one in Segments.' : 'Add one under the ID above.'}
+        </p>
+      )
     case 'base_mismatch':
       return (
         <p>
           <span className={MONO}>{joined}</span> {ids.length === 1 ? 'does' : 'do'} not follow the run&apos;s
           base ID <span className={MONO}>{run.base_id}</span> (expected <span className={MONO}>{run.base_id}-2</span>,{' '}
-          <span className={MONO}>{run.base_id}_Text</span>, …). Rename in Segments.
+          <span className={MONO}>{run.base_id}_Text</span>, …).{' '}
+          {multi ? 'Rename in Segments.' : 'Rename it with the pencil beside the ID above.'}
         </p>
       )
     case 'multiple_ongoing':
@@ -117,6 +127,7 @@ export function HphtRunPage() {
 
   const multi = run.segments.length > 1
   const segmentHref = (id: string) => runViewSearch(params, { segmentId: id })
+  const marks = sampleMarks(view, run.segments)
 
   const results = (
     <div className="space-y-4">
@@ -140,7 +151,8 @@ export function HphtRunPage() {
               icpByResult={icpByResult}
               emptyText="No samples yet"
               segmentHref={segmentHref}
-              markedExperimentId={view?.explicit && multi ? view.segmentId : undefined}
+              markedExperimentId={marks.main}
+              detailsExtra={scalarDetails}
             />
           </div>
         </Card>
@@ -168,7 +180,13 @@ export function HphtRunPage() {
       )}
 
       {side.length > 0 && (
-        <Collapsible title="Side samples" summary={`${side.length} (variants, raw values)`}>
+        <Collapsible
+          // key: picking a side sample opens the section on its marked row.
+          key={marks.side ?? 'none'}
+          title="Side samples"
+          summary={`${side.length} (variants, raw values)`}
+          defaultOpen={marks.side !== undefined}
+        >
           <RunSamplesTable
             rows={[...side].reverse().map(fromHpht)}
             scope="run"
@@ -177,6 +195,8 @@ export function HphtRunPage() {
             onEdit={onEdit}
             icpByResult={icpByResult}
             segmentHref={segmentHref}
+            markedExperimentId={marks.side}
+            detailsExtra={scalarDetails}
           />
         </Collapsible>
       )}

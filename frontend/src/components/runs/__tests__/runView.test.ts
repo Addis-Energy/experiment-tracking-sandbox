@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { RunSegment } from '@/api/runs'
-import { defaultSegment, runViewFrom, runViewSearch } from '../runView'
+import { defaultSegment, runViewFrom, runViewSearch, sampleMarks } from '../runView'
 
 let nextId = 1
 function seg(experimentId: string, over: Partial<RunSegment> = {}): RunSegment {
@@ -51,6 +51,14 @@ describe('runView', () => {
   })
   it('ignores only on a single-segment run', () => {
     expect(runViewFrom(new URLSearchParams('segment=HPHT_304&only=1'), [seg('HPHT_304')])!.only).toBe(false)
+  })
+  it('ignores only for a side sample (variant), and marks it in Side samples', () => {
+    const segs = [...two, seg('HPHT_297-2_Desorption', { is_variant: true })]
+    const v = runViewFrom(new URLSearchParams('segment=HPHT_297-2_Desorption&only=1'), segs)!
+    expect(v.only).toBe(false)
+    expect(sampleMarks(v, segs)).toEqual({ side: 'HPHT_297-2_Desorption' })
+    expect(sampleMarks(runViewFrom(new URLSearchParams('segment=HPHT_297'), segs), segs)).toEqual({ main: 'HPHT_297' })
+    expect(sampleMarks(runViewFrom(new URLSearchParams(''), segs), segs)).toEqual({})
   })
   it('returns null for a run with no segments', () => {
     expect(runViewFrom(new URLSearchParams(''), [])).toBeNull()

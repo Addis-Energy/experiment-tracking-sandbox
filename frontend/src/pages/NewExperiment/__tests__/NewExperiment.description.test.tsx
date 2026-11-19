@@ -126,6 +126,20 @@ describe('NewExperimentPage — description note', () => {
   })
 })
 
+describe('NewExperimentPage — where a new run segment opens (F6)', () => {
+  it('opens a new HPHT segment on its run page and refreshes the cached run', async () => {
+    vi.mocked(experimentsApi.create).mockResolvedValueOnce({
+      id: 42, experiment_id: 'HPHT_900', base_experiment_id: 'HPHT_900',
+    } as never)
+    const user = userEvent.setup()
+    const { qc } = wrap(<NewExperimentPage />)
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+    await createExperiment(user)
+    await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('/hpht/HPHT_900?segment=HPHT_900'))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['hpht-run', 'HPHT_900'] })
+  })
+})
+
 describe('NewExperimentPage — background flag (issue #152)', () => {
   it('sends is_background false by default', async () => {
     const user = userEvent.setup()

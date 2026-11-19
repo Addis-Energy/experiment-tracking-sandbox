@@ -10,13 +10,14 @@ import { Collapsible } from '@/components/runs/Collapsible'
 import { H2Charts } from '@/components/runs/H2Charts'
 import { RunTabs } from '@/components/runs/RunTabs'
 import { SegmentPicker } from '@/components/runs/SegmentPicker'
-import { runViewSearch } from '@/components/runs/runView'
+import { runViewSearch, sampleMarks } from '@/components/runs/runView'
 import { RunNotFound, SegmentIdList, useCanonicalRunUrl } from '@/components/runs/runPageNav'
 import { RunTitle, useRunRecord } from '@/components/runs/useRunRecord'
 import { CORE_FLOOD_WRITES } from './useCoreFloodWrites'
 import { latestSegment, ongoingIds, rootSegments, runDescription } from '@/components/runs/runSegments'
 import { CoreFloodSampleModal } from './CoreFloodSampleModal'
 import { RunSamplesTable } from '@/components/results/RunSamplesTable'
+import { scalarDetails } from '@/components/results/ScalarExtras'
 import { fromCoreFlood } from '@/components/results/sampleRows'
 import { SegmentsTable } from './SegmentsTable'
 import { fmt } from './fields'
@@ -85,6 +86,7 @@ export function CoreFloodRunPage() {
 
   const multi = run.segments.length > 1
   const segmentHref = (id: string) => runViewSearch(params, { segmentId: id })
+  const marks = sampleMarks(view, run.segments)
   // Data checks rename a segment or edit its description: in the Segments table on a
   // multi-segment run, else in the record header, which is the page heading.
   const editSegment = (open: (id: string) => void) => (id: string) => {
@@ -112,7 +114,8 @@ export function CoreFloodRunPage() {
               onEdit={onEdit}
               icpByResult={icpByResult}
               segmentHref={segmentHref}
-              markedExperimentId={view?.explicit && multi ? view.segmentId : undefined}
+              markedExperimentId={marks.main}
+              detailsExtra={scalarDetails}
             />
           </div>
         </Card>
@@ -141,8 +144,11 @@ export function CoreFloodRunPage() {
 
       {side.length > 0 && (
         <Collapsible
+          // key: picking a side sample opens the section on its marked row.
+          key={marks.side ?? 'none'}
           title="Side samples"
           summary={`${side.length} (blanks, bypass)`}
+          defaultOpen={marks.side !== undefined}
         >
           <RunSamplesTable
             rows={[...side].reverse().map(fromCoreFlood)}
@@ -152,6 +158,8 @@ export function CoreFloodRunPage() {
             onEdit={onEdit}
             icpByResult={icpByResult}
             segmentHref={segmentHref}
+            markedExperimentId={marks.side}
+            detailsExtra={scalarDetails}
           />
         </Collapsible>
       )}

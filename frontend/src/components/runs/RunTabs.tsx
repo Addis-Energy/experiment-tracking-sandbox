@@ -17,11 +17,12 @@ export function RunTabs({ view, results }: { view: RunView; results: ReactNode }
   const id = view.segmentId
 
   // Always enabled so the Notes and Entry Logs counts show on every tab.
-  const { data: experiment } = useQuery({
+  const { data: experiment, isError: experimentFailed } = useQuery({
     queryKey: ['experiment', id],
     queryFn: () => experimentsApi.get(id),
   })
-  const { data: conditions } = useQuery({
+  // A segment without conditions answers 404 (an error): that still settles the tab.
+  const { data: conditions, isPending: conditionsPending } = useQuery({
     queryKey: ['conditions', id],
     queryFn: () => conditionsApi.getByExperiment(id),
     retry: false,
@@ -65,17 +66,20 @@ export function RunTabs({ view, results }: { view: RunView; results: ReactNode }
             {RUN_TAB_LABEL[view.tab]} of {id}
           </p>
           <div className="bg-surface-card border border-surface-border rounded-lg overflow-hidden">
-            {!experiment ? <PageSpinner /> : (
+            {experimentFailed && !experiment ? (
+              <p className="text-sm text-red-400 p-4">Could not load {id}.</p>
+            ) : !experiment ? <PageSpinner /> : (
               <>
-                {view.tab === 'conditions' && (
-                  <ConditionsTab conditions={conditions ?? null} experimentId={id} experimentFk={experiment.id} />
-                )}
+                {view.tab === 'conditions' && (conditionsPending ? <PageSpinner /> : (
+                  // key: an open edit form must never survive a change of segment.
+                  <ConditionsTab key={id} conditions={conditions ?? null} experimentId={id} experimentFk={experiment.id} />
+                ))}
                 {view.tab === 'notes' && (
                   // key: a draft must never survive a change of segment.
                   <NotesTab key={id} experimentId={id} notes={experiment.notes} />
                 )}
                 {view.tab === 'logs' && <ModificationsTab modifications={experiment.modifications} />}
-                {view.tab === 'xrd' && <AnalysisTab experimentId={id} />}
+                {view.tab === 'xrd' && <AnalysisTab key={id} experimentId={id} />}
               </>
             )}
           </div>

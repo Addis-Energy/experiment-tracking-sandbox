@@ -240,7 +240,7 @@ describe('ExperimentListPage — replicate grouping', () => {
     render(<ExperimentListPage />, { wrapper })
     await waitFor(() => expect(screen.getByText('SERUM_001')).toBeInTheDocument())
     expect(vi.mocked(experimentsApi.list).mock.calls.at(-1)![0]?.group_replicates).toBe(true)
-    expect(screen.getByRole('button', { name: 'Show replicates of SERUM_001' }))
+    expect(screen.getByRole('button', { name: /show replicates of SERUM_001/ }))
       .toHaveAttribute('title', '3 replicates: a, b, c')
     expect(screen.queryByText('SERUM_001a')).not.toBeInTheDocument()
   })
@@ -249,7 +249,7 @@ describe('ExperimentListPage — replicate grouping', () => {
     const user = userEvent.setup()
     render(<ExperimentListPage />, { wrapper })
     await waitFor(() => expect(screen.getByText('SERUM_001')).toBeInTheDocument())
-    await user.click(screen.getByRole('button', { name: 'Show replicates of SERUM_001' }))
+    await user.click(screen.getByRole('button', { name: /show replicates of SERUM_001/ }))
     expect(screen.getByText('SERUM_001a')).toBeInTheDocument()
     expect(screen.getByText('SERUM_001c')).toBeInTheDocument()
   })
@@ -341,7 +341,7 @@ describe('ExperimentListPage — issue #98: group rows', () => {
   it('badge counts distinct letters, not sibling rows', async () => {
     render(<ExperimentListPage />, { wrapper })
     await waitFor(() => expect(screen.getByText('SERUM_001')).toBeInTheDocument())
-    expect(screen.getByRole('button', { name: 'Show replicates of SERUM_001' }))
+    expect(screen.getByRole('button', { name: /show replicates of SERUM_001/ }))
       .toHaveAttribute('title', '2 replicates: a, b')
   })
 
@@ -349,7 +349,7 @@ describe('ExperimentListPage — issue #98: group rows', () => {
     const user = userEvent.setup()
     const { container } = render(<ExperimentListPage />, { wrapper })
     await waitFor(() => expect(screen.getByText('SERUM_001')).toBeInTheDocument())
-    await user.click(screen.getByRole('button', { name: 'Show replicates of SERUM_001' }))
+    await user.click(screen.getByRole('button', { name: /show replicates of SERUM_001/ }))
     expect(screen.getByText('SERUM_001a')).toBeInTheDocument()
     expect(screen.getByText('SERUM_001b')).toBeInTheDocument()
     expect(container.textContent).not.toMatch(/-t\d/)
@@ -734,7 +734,7 @@ describe('ExperimentListPage — run links and group cues (issue #159)', () => {
     expect(id).toHaveAttribute('href', '/experiments/groups/SERUM_001')
     expect(id).toHaveAttribute('title', 'Open group page')
     expect(id.closest('td')).toHaveTextContent('group')
-    expect(screen.getByRole('button', { name: 'Show replicates of SERUM_001' }))
+    expect(screen.getByRole('button', { name: /show replicates of SERUM_001/ }))
       .toHaveAttribute('title', '2 replicates: a, b')
   })
 
@@ -914,8 +914,11 @@ describe('ExperimentListPage — one page per run (Task 8)', () => {
   it('the group flag expands the replicates; no replicates button remains', async () => {
     const user = userEvent.setup()
     renderList([makeGroupedItem()])
-    const flag = await screen.findByRole('button', { name: 'Show replicates of SERUM_001' })
+    const flag = await screen.findByRole('button', { name: /show replicates of SERUM_001/ })
     expect(flag).toHaveTextContent(/group · 3/i)
+    // The accessible name starts with the visible text (WCAG label in name); keyboard focus shows.
+    expect(flag).toHaveAccessibleName('group · 3: show replicates of SERUM_001')
+    expect(flag.className).toContain('focus-visible:ring-1')
     expect(flag).toHaveAttribute('title', '3 replicates: a, b, c')
     expect(flag).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText(/replicates:/)).not.toBeInTheDocument()

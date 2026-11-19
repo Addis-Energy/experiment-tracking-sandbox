@@ -11,6 +11,8 @@ import { Step3Additives, generateId, type AdditiveRow } from './Step3Additives'
 import { Step4Review } from './Step4Review'
 import { CopyFromExisting } from './CopyFromExisting'
 import { isVisible, type ExperimentType } from './fieldVisibility'
+import { runKindFor } from '@/components/experiments/runContext'
+import { experimentHomePath } from '@/utils/experimentId'
 import { vialSizeForPayload } from './vialSize'
 import { slotToConditions } from '@/utils/reactorSlots'
 
@@ -215,7 +217,12 @@ export function NewExperimentPage() {
       if (replicateError) {
         toastError('Replicate creation failed', replicateError)
       }
-      navigate(`/experiments/${exp.experiment_id}`)
+      // A new HPHT or Core Flood segment opens on its run page. A cached run predates
+      // it, so refresh that run before the page reads it.
+      const base = exp.base_experiment_id
+      const runKind = runKindFor(step1.experimentType)
+      if (runKind && base) queryClient.invalidateQueries({ queryKey: runKind.writes.runQueryKey(base) })
+      navigate(experimentHomePath(step1.experimentType, exp.experiment_id, base))
     },
     onError: (err: Error) => {
       toastError('Failed to create experiment', err.message)

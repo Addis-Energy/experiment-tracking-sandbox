@@ -456,3 +456,77 @@ describe('one page per run', () => {
     await waitFor(() => expect(currentLocation()).toBe('/hpht/HPHT_400?segment=HPHT_400'))
   })
 })
+
+describe('final review fixes', () => {
+  beforeEach(() => {
+    vi.mocked(hphtApi.get).mockReset()
+    vi.mocked(hphtApi.icp).mockReset()
+    vi.mocked(experimentsApi.getResults).mockReset()
+    vi.mocked(experimentsApi.getResults).mockResolvedValue([])
+    vi.mocked(experimentsApi.get).mockClear()
+    vi.mocked(chemicalsApi.listExperimentAdditives).mockResolvedValue([])
+    vi.mocked(resultsApi.getScalar).mockReset()
+  })
+
+  it('F1: an open header editor closes when another segment is picked', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2')
+    const picker = screen.getByRole('navigation', { name: 'Segments' })
+    // Visit the root first, so the -2 segment is cached and the header never unmounts.
+    await userEvent.click(within(picker).getByRole('link', { name: 'HPHT_297' }))
+    await screen.findByRole('heading', { level: 2, name: 'HPHT_297' })
+    await userEvent.click(screen.getByTitle('Edit start date'))
+    expect(screen.getByRole('button', { name: 'Save date' })).toBeInTheDocument()
+
+    await userEvent.click(within(picker).getByRole('link', { name: 'HPHT_297-2' }))
+    await screen.findByRole('heading', { level: 2, name: 'HPHT_297-2' })
+    expect(screen.queryByRole('button', { name: 'Save date' })).not.toBeInTheDocument()
+  })
+
+  it('F2: data checks on a single-segment run point at the header, not Segments', async () => {
+    renderPage({
+      ...SINGLE_RUN,
+      warnings: [
+        { code: 'missing_description', experiment_ids: ['HPHT_304'] },
+        { code: 'base_mismatch', experiment_ids: ['HPHT_304'] },
+      ],
+    })
+    await userEvent.click(await screen.findByRole('button', { name: /^Data checks/ }))
+    const missing = screen.getByTestId('warning-missing_description')
+    expect(missing).toHaveTextContent('No description on HPHT_304. Add one under the ID above.')
+    expect(missing).not.toHaveTextContent(/Segments/)
+    const mismatch = screen.getByTestId('warning-base_mismatch')
+    expect(mismatch).toHaveTextContent(/Rename it with the pencil beside the ID above\.$/)
+    expect(mismatch).not.toHaveTextContent(/Segments/)
+  })
+
+  it('F2: data checks on a multi-segment run still point at Segments', async () => {
+    renderPage({ ...RUN, warnings: [{ code: 'missing_description', experiment_ids: ['HPHT_297-2'] }] })
+    await userEvent.click(await screen.findByRole('button', { name: /^Data checks/ }))
+    expect(screen.getByTestId('warning-missing_description')).toHaveTextContent('Add one in Segments.')
+  })
+
+  it('F3: a selected side sample is marked in Side samples, and only=1 is ignored', async () => {
+    await renderRun('/hpht/HPHT_297?segment=HPHT_297-2_Desorption&only=1')
+    const main = await samplesRegion()
+    const mainRows = within(main).getAllByTestId(/^sample-/)
+    expect(mainRows.length).toBe(MAIN_SAMPLE_COUNT)
+    expect(mainRows.some((r) => r.dataset.marked === 'true')).toBe(false)
+    expect(screen.getByRole('button', { name: /^Side samples/ })).toHaveAttribute('aria-expanded', 'true')
+    const side = screen.getByRole('region', { name: 'Side samples' })
+    expect(within(side).getByTestId('sample-13')).toHaveAttribute('data-marked', 'true')
+    expect(screen.queryByRole('link', { name: /only this segment/i })).not.toBeInTheDocument()
+  })
+
+  it('F9: DETAILS on a run page sample loads its DO and Fe(II)', async () => {
+    vi.mocked(resultsApi.getScalar).mockResolvedValue({
+      id: 1, result_id: 11, final_dissolved_oxygen_mg_L: 3.2, ferrous_iron_yield: null,
+    } as never)
+    await renderRun('/hpht/HPHT_297')
+    const row = within(await samplesRegion()).getByTestId('sample-11')
+    expect(resultsApi.getScalar).not.toHaveBeenCalled()
+    await userEvent.click(within(row).getByRole('button', { name: /^Show details for/ }))
+    await waitFor(() => expect(resultsApi.getScalar).toHaveBeenCalledWith(11))
+    expect(await screen.findByText('DO:')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+})

@@ -7,7 +7,7 @@ import type { RunSegment } from '@/api/runs'
 import { ExperimentRecordHeader } from '@/components/experiments/ExperimentRecordHeader'
 import { experimentHomePath } from '@/utils/experimentId'
 import { runViewFrom, type RunView } from './runView'
-import type { RunWrites } from './runWrites'
+import { trimDeletedSegment, type RunWrites } from './runWrites'
 
 /** What the record wiring reads and trims from a run payload. HPHT also carries
  *  the run's conditions summary, which goes with its segment. */
@@ -55,15 +55,7 @@ export function useRunRecord<R extends RunRecordRun>({ run, params, writes, type
     if (run.segments.length > 1) {
       // Drop the segment from the cached run first, so until the refetch lands the
       // default segment is never the deleted one (it would be fetched into a 404).
-      qc.setQueryData<R>(writes.runQueryKey(run.base_id), (cached) => {
-        if (!cached) return cached
-        const trimmed = {
-          ...cached,
-          segments: cached.segments.filter((s) => s.experiment_id !== deletedId),
-          samples: cached.samples.filter((s) => s.experiment_id !== deletedId),
-        }
-        return cached.conditions?.experiment_id === deletedId ? { ...trimmed, conditions: null } : trimmed
-      })
+      trimDeletedSegment(qc, writes, run.base_id, deletedId)
       navigate(writes.runPath(run.base_id), { replace: true })
       // No segment ID: the record header evicts the deleted experiment's own keys.
       void writes.invalidate(qc, run.base_id, [])
@@ -90,7 +82,9 @@ export function useRunRecord<R extends RunRecordRun>({ run, params, writes, type
     view,
     recordHeader: (
       <div id="record-header">
+        {/* key: an open rename, date or sample editor must never survive a change of segment. */}
         <ExperimentRecordHeader
+          key={segmentId}
           experiment={experiment}
           conditions={conditions}
           headingLevel={run.segments.length > 1 ? 'h2' : 'h1'}

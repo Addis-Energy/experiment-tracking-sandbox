@@ -89,14 +89,22 @@ export function ExperimentDetailPage() {
   // this page.
   const runKind = runKindFor(conditions?.experiment_type)
   const runBaseId = experiment?.base_experiment_id ?? null
-  const { data: run, isLoading: runLoading } = useQuery({
+  const { data: run, isLoading: runLoading, isFetching: runFetching } = useQuery({
     queryKey: runKind && runBaseId ? runKind.writes.runQueryKey(runBaseId) : ['run-context', null],
     queryFn: () => runKind!.fetch(runBaseId!),
     enabled: Boolean(runKind && runBaseId),
     retry: false,
+    // A cached run can predate this experiment (a segment just created): always
+    // ask again on arrival rather than trust the cache's "not in this run". Stale
+    // at once, not refetchOnMount: the query is enabled only after the experiment
+    // and conditions load, and a query enabled late fetches only when stale.
+    staleTime: 0,
   })
+  const inRun = Boolean(experiment && run?.segments.some((s) => s.experiment_id === experiment.experiment_id))
 
-  if (isLoading || conditionsLoading || runLoading) return <PageSpinner />
+  // Hold the spinner until a fetch made after mount has settled, unless the cached
+  // run already contains the experiment (then the redirect needs no refetch).
+  if (isLoading || conditionsLoading || runLoading || (runFetching && !inRun)) return <PageSpinner />
   if (error || !experiment) {
     return (
       <div className="space-y-2 p-6">
@@ -109,7 +117,7 @@ export function ExperimentDetailPage() {
     )
   }
 
-  if (run?.segments.some((s) => s.experiment_id === experiment.experiment_id)) {
+  if (inRun) {
     return (
       <Navigate
         replace

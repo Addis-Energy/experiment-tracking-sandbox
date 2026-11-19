@@ -55,6 +55,14 @@ describe('SegmentPicker', () => {
     expect(screen.queryByRole('link', { name: /only this segment/i })).not.toBeInTheDocument()
   })
 
+  it('hides the only toggle for a side sample (variant)', () => {
+    const withVariant = [...two, seg('HPHT_297-2_Desorption', { is_variant: true })]
+    renderPicker(withVariant, view({ segmentId: 'HPHT_297-2_Desorption', explicit: true }))
+    expect(screen.getByRole('link', { name: 'HPHT_297-2_Desorption' })).toHaveAttribute('aria-current', 'true')
+    expect(screen.queryByRole('link', { name: /only this segment/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /all of the run/i })).not.toBeInTheDocument()
+  })
+
   it('badges ongoing segments', () => {
     renderPicker(two, view())
     expect(screen.getAllByText('Ongoing')).toHaveLength(1)

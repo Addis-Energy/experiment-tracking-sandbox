@@ -59,10 +59,10 @@ function Probe() {
   return <div data-testid="probe">{location.pathname + location.search}</div>
 }
 
-function renderAt(path: string) {
+function renderAt(path: string, client: QueryClient = queryClient) {
   return render(
     <MemoryRouter initialEntries={[path]}>
-      <QueryClientProvider client={queryClient}>
+      <QueryClientProvider client={client}>
         <ToastProvider>
           <Routes>
             <Route path="/experiments/:id" element={<ExperimentDetailPage />} />
@@ -120,5 +120,31 @@ describe('detail page run redirect', () => {
     expect(await screen.findByRole('heading', { level: 1, name: 'SERUM_001a' })).toBeInTheDocument()
     expect(hphtApi.get).not.toHaveBeenCalled()
     expect(coreFloodsApi.get).not.toHaveBeenCalled()
+  })
+
+  describe('a cached run that predates the segment (F6)', () => {
+    // The app's 30 s staleTime: the cached run is fresh, so only a forced refetch reveals the segment.
+    const appClient = () =>
+      new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000 } } })
+
+    it('waits for the refetch and redirects when it contains the experiment', async () => {
+      const client = appClient()
+      client.setQueryData(['hpht-run', 'HPHT_297'], runWith(['HPHT_297']))
+      mockExperiment({ experiment_id: 'HPHT_297-2', base_experiment_id: 'HPHT_297' }, { experiment_type: 'HPHT' })
+      vi.mocked(hphtApi.get).mockResolvedValue(runWith(['HPHT_297', 'HPHT_297-2']))
+      renderAt('/experiments/HPHT_297-2', client)
+      expect(await screen.findByTestId('probe')).toHaveTextContent('/hpht/HPHT_297?segment=HPHT_297-2')
+    })
+
+    it('renders the detail page when the refetch still lacks it', async () => {
+      const client = appClient()
+      client.setQueryData(['hpht-run', 'HPHT_297'], runWith(['HPHT_297']))
+      mockExperiment({ experiment_id: 'HPHT_Y', base_experiment_id: 'HPHT_297' }, { experiment_type: 'HPHT' })
+      vi.mocked(hphtApi.get).mockResolvedValue(runWith(['HPHT_297']))
+      renderAt('/experiments/HPHT_Y', client)
+      expect(await screen.findByRole('heading', { level: 1, name: 'HPHT_Y' })).toBeInTheDocument()
+      expect(hphtApi.get).toHaveBeenCalledWith('HPHT_297')
+      expect(screen.queryByTestId('probe')).not.toBeInTheDocument()
+    })
   })
 })

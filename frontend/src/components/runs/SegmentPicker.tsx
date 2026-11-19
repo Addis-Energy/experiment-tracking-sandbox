@@ -2,7 +2,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import type { RunSegment } from '@/api/runs'
 import { stripOrder } from '@/components/experiments/runContext'
 import { Badge } from '@/components/ui'
-import { runViewSearch, type RunView } from './runView'
+import { isVariantSelected, runViewSearch, type RunView } from './runView'
 
 const CHIP = 'px-2.5 py-1 rounded text-xs border transition-colors'
 const CHIP_ON = 'border-brand-red text-ink-primary bg-surface-raised'
@@ -38,7 +38,8 @@ export function SegmentPicker({ segments, view }: { segments: RunSegment[]; view
           </span>
         )
       })}
-      {view.explicit && (
+      {/* A side sample's rows are not in the main table, so there is nothing to narrow. */}
+      {view.explicit && !isVariantSelected(view, segments) && (
         <Link
           to={runViewSearch(params, { segmentId: view.segmentId, only: !view.only })}
           className="ml-2 text-xs text-red-400 hover:text-red-300"

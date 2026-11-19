@@ -71,6 +71,25 @@ describe('RunTabs', () => {
     expect(await screen.findByText(/Conditions of HPHT_297-2/)).toBeInTheDocument()
   })
 
+  it('F7: says so when the segment cannot be loaded, instead of spinning', async () => {
+    vi.mocked(experimentsApi.get).mockRejectedValue(new Error('boom'))
+    renderTabs(view({ tab: 'notes', segmentId: 'HPHT_297-2' }), null)
+    expect(await screen.findByText('Could not load HPHT_297-2.')).toBeInTheDocument()
+  })
+
+  it('F7: waits for the conditions query before rendering the Conditions tab', async () => {
+    let settle: (v: never) => void = () => {}
+    vi.mocked(conditionsApi.getByExperiment).mockImplementation(
+      () => new Promise((resolve) => { settle = resolve as (v: never) => void }),
+    )
+    renderTabs(view({ tab: 'conditions', segmentId: 'HPHT_297-2' }), null)
+    // The segment has loaded (its notes count shows) while conditions are still pending.
+    await screen.findByRole('link', { name: /Notes\s*4/ })
+    expect(screen.queryByText('No conditions recorded for this experiment.')).not.toBeInTheDocument()
+    settle(null as never)
+    expect(await screen.findByText('No conditions recorded for this experiment.')).toBeInTheDocument()
+  })
+
   it('links each tab by ?tab= and omits it for results', async () => {
     renderTabs(view({ tab: 'results', segmentId: 'HPHT_297-2' }), null)
     expect(screen.getByRole('link', { name: /^Results/ })).toHaveAttribute('href', '/hpht/HPHT_297')

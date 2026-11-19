@@ -382,14 +382,14 @@ function ExperimentRow({ exp, child, expanded, onToggle }: {
         </span>
         {isLetterGroupRow ? (
           <button
-            aria-label={`Show replicates of ${displayId}`}
+            aria-label={`group · ${replicateLetters.length}: show replicates of ${displayId}`}
             aria-expanded={expanded ?? false}
             title={`${replicateLetters.length} replicates: ${replicateLetters.join(', ')}`}
             onClick={(e) => {
               e.stopPropagation()
               onToggle?.()
             }}
-            className="ml-2 inline-flex items-center gap-1.5 px-2 py-0.5 text-2xs font-medium rounded border uppercase tracking-wider bg-surface-overlay text-ink-secondary border-surface-border cursor-pointer hover:text-ink-primary"
+            className="ml-2 inline-flex items-center gap-1.5 px-2 py-0.5 text-2xs font-medium rounded border uppercase tracking-wider bg-surface-overlay text-ink-secondary border-surface-border cursor-pointer hover:text-ink-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-red-500"
           >
             group · {replicateLetters.length}
             <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
