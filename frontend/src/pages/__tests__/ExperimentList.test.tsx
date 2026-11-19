@@ -931,12 +931,15 @@ describe('ExperimentListPage — one page per run (Task 8)', () => {
     expect(screen.queryByRole('button', { name: /show replicates/i })).not.toBeInTheDocument()
   })
 
-  it('the description wraps to two lines and carries the full text as its title', async () => {
+  it('the description clamps to two lines inside the cell, which carries the full text as its title', async () => {
     renderList([plain({ description: LONG })])
-    const cell = (await screen.findByText(LONG)).closest('td')!
+    const text = await screen.findByText(LONG)
+    const cell = text.closest('td')!
     expect(cell).toHaveAttribute('title', LONG)
-    expect(cell.className).toContain('line-clamp-2')
+    expect(cell.className).not.toContain('line-clamp')
     expect(cell.className).not.toContain('truncate')
+    expect(text).not.toBe(cell)
+    expect(text.className).toContain('line-clamp-2')
   })
 
   it('an HPHT row opens its run with the segment selected, and the reactor is not a second link', async () => {

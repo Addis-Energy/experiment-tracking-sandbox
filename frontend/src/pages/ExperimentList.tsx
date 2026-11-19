@@ -403,10 +403,12 @@ function ExperimentRow({ exp, child, expanded, onToggle }: {
         {exp.is_background && <Badge variant="info" className="ml-2">BG</Badge>}
       </Td>
       <Td
-        className="text-xs text-ink-secondary min-w-[20rem] max-w-[36rem] whitespace-normal line-clamp-2"
+        className="text-xs text-ink-secondary min-w-[16rem] max-w-[36rem] whitespace-normal"
         title={exp.description ?? undefined}
       >
-        {exp.description ?? <span className="text-ink-muted">—</span>}
+        <div className="line-clamp-2">
+          {exp.description ?? <span className="text-ink-muted">—</span>}
+        </div>
       </Td>
       <Td className="font-mono-data text-xs">
         {exp.sample_id ?? <span className="text-ink-muted">—</span>}
