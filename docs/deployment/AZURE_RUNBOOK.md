@@ -828,15 +828,60 @@ rollback path is no longer needed. [PS] as administrator on the lab PC.
    `Get-ScheduledTask ExperimentTrackerUpdate` shows `Disabled`. These were already
    disabled at the switch (R2 step 2); this keeps them so. Do not uninstall
    the service yet.
-2. **Rotate the local `postgres` password.** The old one was hard-coded in
-   `backup.ps1` for years and is in git history:
-   ```powershell
-   & "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -h localhost -c "\password postgres"
-   ```
-   Expected: prompts twice for the new password; store it in the password manager.
-   Nothing on the lab PC needs the local DB any more, so delete the
-   `localhost:5432:experiments:postgres` line from the backup task account's
-   `pgpass.conf` (Section 0 prerequisite) rather than updating it.
+2. **Rotate the local `postgres` password.** The old one (`password`) was
+   hard-coded in `backup.ps1` for years and is in git history. Every command in
+   this step is typed in **PowerShell** on the lab PC, not at a `psql` prompt:
+   PowerShell starts `psql.exe` for a single command, and `psql` only ever asks
+   you for passwords. Run it as the backup task's account (Section 0 step 1 finds
+   it). If that isn't the account you're logged in as, open PowerShell with
+   `runas /user:<account> powershell` and run everything in the new window.
+   1. [PS] Clear session settings that would override the saved password or point
+      `psql` at Azure:
+      ```powershell
+      Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+      Remove-Item Env:PGSSLMODE -ErrorAction SilentlyContinue
+      Remove-Item Env:PGHOST -ErrorAction SilentlyContinue
+      ```
+      Expected: no output.
+   2. [PS] Set the new password:
+      ```powershell
+      & "C:\Program Files\PostgreSQL\18\bin\psql.exe" -h localhost -U postgres -d experiments -c "\password postgres"
+      ```
+      Expected: `Enter new password for user "postgres":` and then `Enter it
+      again:`. Type the new password at each; nothing appears as you type. You
+      return to the PowerShell prompt with no error. If it first asks
+      `Password for user postgres:`, this account has no `pgpass.conf` line: enter
+      the old password there, then the new one twice. Avoid `:` and `\` in the new
+      password. Store it in the password manager.
+   3. [PS] Delete the saved local line rather than updating it. Nothing on the lab
+      PC uses the local DB any more; the Azure line from R1.10 stays:
+      ```powershell
+      $f = "$env:APPDATA\postgresql\pgpass.conf"
+      (Get-Content $f) | Where-Object { $_ -notlike 'localhost:5432:experiments:postgres:*' } | Set-Content $f -Encoding ascii
+      Get-Content $f | ForEach-Object { ($_ -split ':')[0..3] -join ':' }
+      ```
+      Expected: the last command lists each line without its password. The
+      `localhost:5432:experiments:postgres` line is gone and the
+      `<PG>.postgres.database.azure.com:5432:experiments:experiments_backup` line
+      is still there. Keep `-Encoding ascii`: other encodings make the file
+      unreadable to Postgres.
+   4. [PS] Confirm the old password is dead and the new one works:
+      ```powershell
+      & "C:\Program Files\PostgreSQL\18\bin\psql.exe" -h localhost -U postgres -d experiments -c "select 1"
+      ```
+      Run it twice. At `Password for user postgres:` enter `password` the first
+      time. Expected: `password authentication failed`. The second time, enter the
+      new password. Expected: a one-row result showing `1`.
+   5. [PS] Confirm the nightly backup to Azure is unaffected:
+      ```powershell
+      & "C:\Program Files\PostgreSQL\18\bin\psql.exe" -w -h localhost -U postgres -d experiments -c "select 1"
+      ```
+      Expected: `fe_sendauth: no password supplied`, because the local line is
+      gone. Check `Get-Content C:\Logs\experiment-tracker\backup.log -Tail 5` the
+      next morning. Expected: "Backup complete" for that night.
+
+   If the local DB is ever needed again (for example a late R3 rollback), re-add
+   the line from Section 0 step 2 with the new password.
 3. **Keep `ExperimentTrackerBackup` running**, now against Azure (R1.10). It must run
    under an account whose password isn't rotated; a scheduled task stops silently
    when its account's password changes. Check:
