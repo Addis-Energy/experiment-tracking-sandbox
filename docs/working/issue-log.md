@@ -3221,3 +3221,10 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Verification:** vitest 827 passed (81 files) on the final tree (812 before the review fix wave); `npm run lint` and `npm run type-check` exit 0. Browser check by the controller on the dev app: segment URL redirect with tab kept, single-segment page with no picker, marked rows and the only-toggle, record tabs switching with the segment, Core Flood H₂ charts and open ICP, list links, group flag, serum opening on Results.
 - **Deploy:** frontend only; no migration, no package change, no backend restart needed beyond the normal deploy.
 - **Tests added:** yes. **Docs updated:** yes. **Decision logged:** yes — `decisions.md` 2026-11-19.
+
+## 2026-11-23 | inline (#196) — R6 local postgres password rotation, step by step (`chore/issue-196-r6-password-steps`)
+- **Why:** Mat chose to keep the lab PC's local `postgres` password (`password`) until R6 rather than rotate it now, and asked for exact commands with each one labelled PowerShell or psql.
+- **What changed:** R6 step 2 now lists five PowerShell-only sub-steps: clear PGPASSWORD/PGSSLMODE/PGHOST, `\password postgres` via `psql -c`, remove the localhost line from `pgpass.conf` (ascii encoding, passwords masked on display), confirm old password fails and new one works, confirm the next backup log.
+- **Files changed:** `docs/deployment/AZURE_RUNBOOK.md`
+- **Tests added:** no — runbook text only
+- **Decision logged:** no
