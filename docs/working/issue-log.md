@@ -3266,3 +3266,9 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Files changed:** `backend/api/routers/results.py`, `backend/services/experiment_deletion.py`, `tests/api/test_results.py`, `tests/services/test_experiment_deletion.py`, `docs/CALCULATIONS.md`, `docs/api/API_REFERENCE.md` (+ `project_context` copies), `.claude/rules/MODELS-deletion.md`, `docs/working/issue-log.md`
 - **Tests added:** yes, 2 (both watched failing first). Scoped suite (services, regression, api, models, views, data_migrations): 1963 passed.
 - **Decision logged:** yes, in `CALCULATIONS.md` ("Deleting a segment")
+
+## 2026-11-24 | issue #139 — Core Flood run page: empty state for a run with no samples (`fix/issue-139-cf-run-empty-state`)
+- **What changed:** `CoreFloodRunPage` now passes `emptyText="No samples yet"` to the main `RunSamplesTable`, as `HphtRunPage` already did. The run totals already read "—" (via `fmt`), and the H₂ chart already says "No H₂ measurements on this run yet."; the new test pins both.
+- **Files changed:** `frontend/src/pages/CoreFloods/CoreFloodRunPage.tsx`, `frontend/src/pages/CoreFloods/__tests__/CoreFloodRunPage.test.tsx`, `docs/working/issue-log.md`
+- **Tests added:** yes, 1 (watched failing first). Full vitest: 81 files, 828 passed; lint and type-check exit 0.
+- **Decision logged:** no
