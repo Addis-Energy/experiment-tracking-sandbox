@@ -24,7 +24,7 @@ if ! [[ "$NAME" =~ ^[a-z][a-z0-9._]*$ ]]; then
     echo "Invalid name '$NAME': must match ^[a-z][a-z0-9._]*\$" >&2
     exit 2
 fi
-if [[ "$NAME" =~ ^(experiments_app|experiments_backup|reporting_reader|postgres|azuresu)$ \
+if [[ "$NAME" =~ ^(experiments_app|lab_backup|reporting_reader|addisadmin|postgres|azuresu)$ \
     || "$NAME" =~ ^(pg_|azure) ]]; then
     echo "Refusing reserved role name '$NAME'" >&2
     exit 2

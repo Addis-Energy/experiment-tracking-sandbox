@@ -3228,3 +3228,18 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Files changed:** `docs/deployment/AZURE_RUNBOOK.md`
 - **Tests added:** no — runbook text only
 - **Decision logged:** no
+
+## 2026-11-24 | inline (#196) — record Azure as built; align scripts and runbook (`chore/issue-196-azure-as-built`)
+- **Why:** Mat provisioned the resource group, Postgres server, database, roles and App Service by hand in the portal. Names and a few settings differ from the scripts and runbook written 2026-11-17.
+- **What changed:**
+  - Spec: new §7 "As built" and an open-items list; region East US 2 and why; geo-redundant backup off; `lab_backup` as a member of `reporting_reader`; networking and Entra; secure unique hostname; repo transfer done; costs.
+  - `roles.sql` / `grants.sql` match the hand-run SQL: `lab_backup`, membership, role time zones, CONNECT, sequences to `reporting_reader`, extensions. They are updated rather than adding a duplicate `create_roles.sql`.
+  - `provision.sh`: `PLAN` is overridable (otherwise it would create a second billed plan); geo flag Disabled; startup command `python -m uvicorn`.
+  - `azure.env.example` carries the real names.
+  - grant/revoke scripts reserve `lab_backup` and `addisadmin`.
+  - Runbook: an "already built" note in R1.0/R1.2, `addisadmin`, `lab_backup` throughout, `<default host>` from `defaultHostName` in place of `<APP>.azurewebsites.net`, geo expected Disabled, the real repo path for OIDC.
+  - `PSQL_ACCESS.md`: one role-name line.
+- **Not changed:** the brief asked to keep ENVIRONMENT, STACK, CLAUDE.md, deploy.md and the user guides describing the lab PC until cutover, but that sweep already shipped with #196 on 2026-11-23 (main 49f13e8), with "until 2026-12-03" notes. Left as is.
+- **Files changed:** `docs/superpowers/specs/2026-11-17-azure-migration-design.md`, `docs/deployment/AZURE_RUNBOOK.md`, `docs/PSQL_ACCESS.md`, `scripts/azure/{roles.sql,grants.sql,provision.sh,azure.env.example,grant_db_access.sh,revoke_db_access.sh}`, `docs/working/decisions.md`
+- **Tests added:** no (docs and SQL/shell scripts; `bash -n` on the shell scripts)
+- **Decision logged:** yes — decisions.md 2026-11-24

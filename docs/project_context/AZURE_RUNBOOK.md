@@ -20,7 +20,14 @@ export PGHOST="$PG.postgres.database.azure.com"
 export PGSSLMODE=require
 export AZ_RG="$RG" AZ_PG_SERVER="$PG" PGUSER="$PG_ADMIN_USER"   # used by R5
 az account set --subscription "$SUBSCRIPTION"
+# "Secure unique default hostname" is on: the app's address is
+# addisenergy-lab-<random>.eastus2-01.azurewebsites.net, NOT <APP>.azurewebsites.net.
+DEFAULT_HOST="$(az webapp show -g "$RG" -n "$APP" --query defaultHostName -o tsv | tr -d '\r')"
+echo "$DEFAULT_HOST"
 ```
+
+Wherever this runbook says `<default host>`, use that exact value. It is also
+the GoDaddy CNAME target and a Firebase authorized domain.
 
 **Prerequisite for R1.** Do the local backup password prerequisite below *first*.
 Then: the branch carrying the Azure scripts (including
@@ -86,8 +93,22 @@ end of this section.
 
 ### R1.0 Provision
 
+**Already built in the portal (2026-11-24; spec §7):**
+- resource group `DataApplication` (East US 2)
+- server `addisenergy-db` (admin `addisadmin`), database `experiments` and its roles
+- web app `addisenergy-lab` on plan `ASP-DataApplication-965e`
+
+`provision.sh` skips what exists and adds the rest: app config and settings,
+firewall rules, storage, monitoring, alerts and the budget. Copy
+`azure.env.example` as is for those names. **`PLAN` must be set**, or the script
+creates a second, billed App Service plan. Server settings fixed at creation
+(Burstable B2s, 35-day retention, geo-redundant backup *off*, public access plus
+private endpoints) are not changed by the script.
+
 1. [bash] `bash scripts/azure/provision.sh`. It reads `scripts/azure/azure.env`. The
    Postgres admin password comes from `$PG_ADMIN_PASSWORD` or a hidden prompt.
+   Afterwards, delete the firewall rule the portal created for the creating
+   machine if it duplicates the `admin` or `hq` rule.
 2. It prints a placeholder `az webapp config appsettings set` command for
    `DATABASE_URL`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`,
    `FIREBASE_CLIENT_EMAIL`, `FIREBASE_CLIENT_ID` and `FIREBASE_CLIENT_CERT_URL` (the
@@ -101,7 +122,7 @@ end of this section.
    (the repo is in the Addis org). [bash], with `<org>/<repo>` the real repo path,
    `gh auth login`ed as a repo admin:
    ```bash
-   GH_REPO_PATH=<org>/<repo>
+   GH_REPO_PATH=Addis-Energy/experiment-tracking-sandbox   # transferred 2026-11-23
    CLIENT_ID="$(az ad app create --display-name experiment-tracker-deploy \
      --query appId -o tsv | tr -d '\r')"
    SP_ID="$(az ad sp create --id "$CLIENT_ID" --query id -o tsv | tr -d '\r')"
@@ -157,7 +178,8 @@ end of this section.
    az postgres flexible-server show -g "$RG" -n "$PG" \
      --query "{ver:version,ret:backup.backupRetentionDays,geo:backup.geoRedundantBackup}"
    ```
-   Expected: `America/New_York`; version `18`, retention `35`, geo `Enabled`.
+   Expected: `America/New_York`; version `18`, retention `35`, geo `Disabled`
+   (Mat's choice; the lab PC dump to SharePoint is the off-Azure copy).
 6. First deploy: GitHub, Actions, "Deploy to Azure", Run workflow. Expected: the log
    shows migrations running and Oryx running `pip install`. Repo secrets
    `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_DATABASE_URL`
@@ -185,6 +207,12 @@ If this fails: check the `postgres` password and that you used the PG 18 `pg_dum
 
 ### R1.2 Roles, then the database
 
+**Already done on `addisenergy-db` (2026-11-24):** the roles and the `experiments`
+database exist. Re-running `roles.sql` is safe: it changes no password, and only
+re-applies the membership, the role time zones and the admin's `experiments_app`
+membership. Skip the `CREATE DATABASE` line unless you dropped the database (R1.3
+"If this fails"). The steps below are for rebuilding from scratch.
+
 [bash] The admin runs `roles.sql` with passwords passed through a `\set` prelude on
 stdin (never `-v`, which shows in the process list).
 
@@ -198,9 +226,9 @@ openssl rand -base64 32 | tr -dc A-Za-z0-9 | head -c 32; echo
 
 ```bash
 read -rs -p "experiments_app password: " APP_PW; echo
-read -rs -p "experiments_backup password: " BACKUP_PW; echo
+read -rs -p "lab_backup password: " BACKUP_PW; echo
 read -rs -p "Azure admin password: " PGPASSWORD; echo   # env, never argv
-export PGPASSWORD PGUSER=pgadmin PGDATABASE=postgres
+export PGPASSWORD PGUSER=addisadmin PGDATABASE=postgres
 {
   printf "\\\\set app_password '%s'\n" "$APP_PW"
   printf "\\\\set backup_password '%s'\n" "$BACKUP_PW"
@@ -255,13 +283,14 @@ PGUSER=experiments_app PGDATABASE=experiments psql -v ON_ERROR_STOP=1 \
 unset PGPASSWORD
 ```
 
-Expected: no errors. This gives `reporting_reader` and `experiments_backup` their
-read access (existing objects plus default privileges for future ones).
+Expected: no errors. This gives `reporting_reader` read access on tables and
+sequences (existing objects plus default privileges for future ones). `lab_backup`
+and every researcher login get it through membership.
 
 ### R1.5 Start the app; snapshot and diff
 
 1. Redeploy or restart the web app (`az webapp restart -g "$RG" -n "$APP"`). Open
-   `https://<APP>.azurewebsites.net`. Expected: the sign-in page loads.
+   `https://<default host>` (Section 0). Expected: the sign-in page loads.
 2. Snapshot the lab PC (BEFORE), [PS] on the lab PC with `DATABASE_URL` set in the
    shell to the local DB:
    ```powershell
@@ -401,7 +430,7 @@ default privileges must cover them.
        # Azure Postgres server FQDN; the local default is 'localhost'
        DbHost       = '<PG>.postgres.database.azure.com'
        # Read-only backup role created by roles.sql
-       DbUser       = 'experiments_backup'
+       DbUser       = 'lab_backup'
        # Write-only SAS URL for heartbeat/labpc-backup. This is a credential:
        # keep it out of the repo, logs and chat.
        HeartbeatUrl = 'https://<STORAGE>.blob.core.windows.net/heartbeat/labpc-backup?<sas>'
@@ -414,7 +443,7 @@ default privileges must cover them.
 2. The password comes from the backup task account's
    `%APPDATA%\postgresql\pgpass.conf` (log in as that account, or use `runas`):
    ```
-   <PG>.postgres.database.azure.com:5432:experiments:experiments_backup:<password>
+   <PG>.postgres.database.azure.com:5432:experiments:lab_backup:<password>
    ```
 3. Create the heartbeat SAS. A user-delegation SAS (`--as-user`) is capped at 7
    days, so use an account-key SAS tied to a stored access policy on the
@@ -512,7 +541,7 @@ If this fails: the usual cause is the venv not activated (`ModuleNotFoundError`)
 
 ### R1.12 Team smoke test
 
-Give the team `https://<APP>.azurewebsites.net`. Add that host to Firebase
+Give the team `https://<default host>` (Section 0). Add that host to Firebase
 Authorized domains first (Firebase console, Authentication, Settings). Each person
 signs in, opens an experiment, uploads a small file, and views a sample's Photos
 tab. Expected: no errors. Collect problems in the issue.
@@ -554,7 +583,8 @@ Rehearsal-only checks to record:
 ## R2 Switch (Thu 2026-12-03, morning)
 
 Before the day: the colleague has checked that CAA records allow `digicert.com`,
-and added the GoDaddy `CNAME data -> <APP>.azurewebsites.net` and the
+and added the GoDaddy `CNAME data -> <default host>` (Section 0; it has a random
+suffix, so send the colleague the exact value) and the
 `asuid.data` TXT record (value from `az webapp show --query customDomainVerificationId`)
 by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
 
@@ -613,9 +643,9 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
    `az webapp config ssl bind --certificate-thumbprint <t> --ssl-type SNI`.
    Expected: `https://data.addisenergy.com` loads with a valid certificate.
    If this fails: certificate issuance fails if the CNAME/TXT are missing or the CAA
-   record doesn't allow digicert.com. Use the `azurewebsites.net` address in the
+   record doesn't allow digicert.com. Use the `<default host>` address in the
    meantime and ask the colleague to fix DNS.
-   Add `data.addisenergy.com` **and** the `*.azurewebsites.net` host to Firebase
+   Add `data.addisenergy.com` **and** `<default host>` to Firebase
    Authorized domains. `CORS_ORIGINS` is already `https://data.addisenergy.com`.
 5. **Sign-in check.** From a browser not previously logged in: sign in at
    `https://data.addisenergy.com`, open an experiment, and view recent data.
@@ -667,11 +697,11 @@ up to the freeze; Azure may have newer data entered since. This carries it back.
    `disabled_manually`. Re-enable it (`gh workflow enable "Deploy to Azure"`) only
    when Azure is brought back into service for a new switch attempt.
 1. **Dump Azure on the lab PC** [PS] (it has PG 18 tools and is allowed through the
-   firewall). Use `experiments_backup` credentials (password from `pgpass.conf`):
+   firewall). Use `lab_backup` credentials (password from `pgpass.conf`):
    ```powershell
    $env:PGSSLMODE = 'require'
    & "C:\Program Files\PostgreSQL\18\bin\pg_dump.exe" -h <PG>.postgres.database.azure.com `
-     -U experiments_backup -Fc -f C:\Backups\experiments\rollback_azure.dump experiments
+     -U lab_backup -Fc -f C:\Backups\experiments\rollback_azure.dump experiments
    ```
    Expected: exit 0.
 2. **Restore over the local DB.** This replaces the local data, so first take a
@@ -730,7 +760,7 @@ anyone but `experiments_app` would own the rebuilt views.
 preview at all and commit as soon as they run. Never assume; read each script first.
 
 1. **Safety dump first, before running anything.** On the lab PC, with
-   `experiments_backup`, run the R3 step 1 dump command to a dated file. Expected:
+   `lab_backup`, run the R3 step 1 dump command to a dated file. Expected:
    exit 0 and a plausible file size.
 2. Open the console: portal, the web app, Development Tools, SSH (or
    `az webapp ssh -g "$RG" -n "$APP"`).
@@ -807,7 +837,7 @@ Updating a changed IP = revoke, then grant with the new IP. This rotates their
 password, so send the new connection string.
 
 If this fails: both scripts refuse reserved names (`experiments_app`,
-`experiments_backup`, `reporting_reader`, `postgres`, `azure*`, `pg_*`). If revoke
+`lab_backup`, `reporting_reader`, `addisadmin`, `postgres`, `azure*`, `pg_*`). If revoke
 reports a wrong Azure target, check `AZ_RG` and `AZ_PG_SERVER`; it refuses on
 purpose rather than delete the wrong rule.
 
@@ -862,7 +892,7 @@ rollback path is no longer needed. [PS] as administrator on the lab PC.
       ```
       Expected: the last command lists each line without its password. The
       `localhost:5432:experiments:postgres` line is gone and the
-      `<PG>.postgres.database.azure.com:5432:experiments:experiments_backup` line
+      `<PG>.postgres.database.azure.com:5432:experiments:lab_backup` line
       is still there. Keep `-Encoding ascii`: other encodings make the file
       unreadable to Postgres.
    4. [PS] Confirm the old password is dead and the new one works:

@@ -3,7 +3,7 @@
 **Date:** 2026-11-17 (revised the same day after an external review)
 **Owner / approver:** Mat (data-location approver; Azure subscription owner and billing contact)
 **Hard deadline:** 2026-12-15 (Tailscale access ends)
-**Status:** awaiting Mat's approval of this document
+**Status:** approved by Mat 2026-11-17. As-built record added 2026-11-24 (§7); where §7 differs from §4–§6, §7 is what exists.
 
 ---
 
@@ -59,11 +59,11 @@ In Mat's words, the failure to avoid on the first morning is **"data missing or 
 - **Owner:** Mat creates a new **Pay-As-You-Go** Azure subscription with their Addis work account, in the existing Microsoft Entra directory. No subscription exists today (checked 2026-11-17). Applying to Microsoft for Startups (Founders Hub) for credits runs in parallel and must not block anything.
 - **Second owner:** Michael Alexander is added as an Owner of the subscription (Mat, 2026-11-17), before the rehearsal. Alerts (§5.10) go to both owners.
 - **Domain:** `data.addisenergy.com`. DNS for addisenergy.com is hosted at GoDaddy and managed by a colleague, who adds the records (a CNAME plus an `asuid` TXT verification record). The colleague also checks for **CAA records**: App Service's free certificate comes from DigiCert, so a CAA record that doesn't allow DigiCert blocks it.
-- **GitHub repo moves to an Addis organization** (Mat, 2026-11-17), **before the deploy workflow is set up**, because the GitHub-to-Azure sign-in (OIDC) is tied to the repo path. Today the repo is on Mat's personal account (`mathew-h`).
+- **GitHub repo moves to an Addis organization** (Mat, 2026-11-17), **before the deploy workflow is set up**, because the GitHub-to-Azure sign-in (OIDC) is tied to the repo path. **Done 2026-11-23:** now `Addis-Energy/experiment-tracking-sandbox` (Free organization plan). The Team plan ($4/user/month) is only needed for branch protection or deployment environments on a private repo.
   - Steps: create a free GitHub organization for Addis, with Mat and a second admin; transfer the repo; update `origin` on the dev machines and the lab PC. GitHub redirects the old URL, but don't rely on that.
   - Re-check what the transfer can drop: the CI workflow (`frontend-checks.yml`), branch protection and secrets.
   - The deploy workflow and its secrets are created only in the new location.
-- **Region:** a US region (default East US; builder may pick East US 2 if capacity or price is better).
+- **Region:** **East US 2** (as built). East US was the first choice, but Azure refused PostgreSQL Flexible Server there ("subscription not allowed to provision in East US"), a capacity restriction on new subscriptions. Every resource sits in East US 2 so the app and database share a region.
 - **Locked components** (`docs/LOCKED_COMPONENTS.md`): models, alembic history, bulk-upload parsers, enums and Firebase auth must not change. The timezone fix (§5.2) is settings only for that reason. The photo storage change touches `backend/api/routers/samples.py` and settings only, not the models.
 - **Packages:**
   - `azure-storage-blob` is already listed in `requirements.txt:80`, unpinned and unused. It gets pinned.
@@ -97,7 +97,9 @@ In Mat's words, the failure to avoid on the first morning is **"data missing or 
 - researchers granted access on request (§5.7)
 - the deploy runner, only while a job runs (§5.4)
 
-There is **no "Allow Azure services" rule**: it admits every Azure customer's resources.
+There is **no "Allow Azure services" rule**: it admits every Azure customer's resources. (Power BI, the one consumer that would have needed it, is retired.)
+
+**As built:** the server's networking mode is *public access (allowed IP addresses) plus private endpoints*. That mode can only be set at creation. No private endpoint exists yet; the firewall rules above are the only way in. Sign-in accepts both PostgreSQL passwords and Microsoft Entra (Entra admin: Mat). Every role in §5.2 uses a password.
 
 HQ is in a shared building (Hatch.Bio). If its internet connection is shared across tenants, the HQ rule admits the whole building. The builder confirms this with Mat during the rehearsal, and a login plus password stays the real barrier either way.
 
@@ -105,7 +107,7 @@ HQ is in a shared building (Hatch.Bio). If its internet connection is shared acr
 - **Pin the app to one worker process.** That matches the lab PC today, which runs one uvicorn process (`setup.ps1:195`). Each extra process also rebuilds every view at startup.
 - **Use Burstable B2s** (far higher connection limit), so CI, backups and researchers fit alongside the app with headroom. If the server is scaled up later, `max_connections` must be raised by hand; it keeps its original value.
 
-Rough cost: $50–100/month (to be priced in the plan).
+Rough cost: about $66/month list as built (§7): Postgres about $53, App Service about $12.41, plus small storage and monitoring charges. The budget alert is set at about $120/month.
 
 ### 5.2 Data move, roles and timezone
 
@@ -127,7 +129,9 @@ Rough cost: $50–100/month (to be priced in the plan).
 - **Everything that can import `database` connects as the app role.** That covers the app, the CI migration step and admin scripts, because `database/event_listeners.py:99-104,1180-1197` drops and recreates every `v_*` view on import, including from `alembic/env.py:11`. The Azure admin can't drop views the app role owns, and vice versa.
 - **Grants survive view rebuilds only through default privileges set by the app role.**
   - Every start recreates the views, which wipes direct grants on them.
-  - The researcher group role (§5.7) and the backup role (§5.6) therefore get `ALTER DEFAULT PRIVILEGES FOR ROLE experiments_app IN SCHEMA public GRANT SELECT ON TABLES ...` (and `USAGE, SELECT ON SEQUENCES` for the backup role), plus a one-time grant on existing objects.
+  - The researcher group role `reporting_reader` (§5.7) therefore gets `ALTER DEFAULT PRIVILEGES FOR ROLE experiments_app IN SCHEMA public GRANT SELECT ON TABLES` and `... ON SEQUENCES`, plus a one-time grant on existing objects after the restore.
+  - **As built:** the backup login `lab_backup` (§5.6) is a *member* of `reporting_reader` rather than holding its own grants, so pg_dump's sequence reads come through the group. Researchers can therefore read sequence values too, which is harmless.
+  - Both login roles that write or dump data (`experiments_app`, `lab_backup`) also carry `ALTER ROLE ... SET timezone = 'America/New_York'` on top of the server parameter.
   - `docs/PSQL_ACCESS.md:563` omits `FOR ROLE` and is corrected.
 - Allow-list `uuid-ossp` and `pg_trgm` (`azure.extensions`) if the dump references them.
 
@@ -158,7 +162,7 @@ Rough cost: $50–100/month (to be priced in the plan).
 - **When it runs (my call):** on a nightly schedule (02:00 Eastern, as today) plus a manual "run now" button. It does not run on every push to `main`. Basic tier has no staging slot, so a deploy restarts the app; nightly keeps that out of working hours. `/deploy` keeps its meaning (develop → main).
 - **Concurrency:** one deploy at a time (a workflow `concurrency` group, no cancel-in-progress), so two runs never migrate at once.
 - **Migrations** run in the workflow as the app role (§5.2), so a failed migration blocks the deploy. The workflow adds a firewall rule for the runner's IP at the start and removes it in an always-run step.
-- **Startup command:** `uvicorn backend.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1`.
+- **Startup command:** `python -m uvicorn backend.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1`.
 - **Data-fix scripts against prod** (the Azure equivalent of "run the cleanup on the lab PC first" in `.claude/commands/deploy.md`): run them from the App Service SSH console, which already has the code and the settings, as the app role. `/deploy`'s Step 0 is rewritten to say so.
 
 ### 5.5 Config on Azure
@@ -170,14 +174,14 @@ Rough cost: $50–100/month (to be priced in the plan).
   - `TZ=America/New_York`
   - the photo storage backend and Blob settings
 - `ENABLE_API_DOCS` is **not** set.
-- Firebase Auth authorized domains: add `data.addisenergy.com` and the `*.azurewebsites.net` hostname.
+- Firebase Auth authorized domains: add `data.addisenergy.com` and the app's exact default hostname. "Secure unique default hostname" is on, so that is `addisenergy-lab-<random>.eastus2-01.azurewebsites.net`, not `addisenergy-lab.azurewebsites.net` (§7).
 
 ### 5.6 Backups
 
-- **Azure:** Flexible Server automated backups with **35-day retention** (the default is 7). **Geo-redundant backup can only be chosen at server creation.** *My call: on.* It costs roughly double the backup storage, which is small at this data size, and it covers a region-wide outage. Mat can turn it down before provisioning.
+- **Azure:** Flexible Server automated backups with **35-day retention** (the default is 7). **Geo-redundant backup: off** (Mat, at creation 2026-11-24). It can only be chosen at server creation, so this is permanent for this server. The nightly lab PC dump to SharePoint is the copy outside the region. The original call here was "on".
 - **Outside Azure:** the **lab PC keeps running backups after the switch** (Mat, 2026-11-17). It stays at HQ, powered on, and runs nightly as today. Its scheduled `backup.ps1` is repointed to Azure, still writing to `C:\Backups\experiments` and the SharePoint-synced `03_Backups` folder.
   - It reads its password from a local secret outside the repo.
-  - It connects as a read-only backup role.
+  - It connects as the read-only backup role `lab_backup`.
   - It uses `sslmode=require` and a PG 18 `pg_dump`.
   - It runs as a dedicated local account, or one whose password isn't rotated, because the scheduled task stops silently when its account's password changes.
   - The Postgres firewall allows the HQ IP. If HQ's IP turns out to be dynamic, the builder flags it during the rehearsal.
@@ -230,3 +234,58 @@ Each alert emails Mat and the second owner.
 - OIDC federated credential for GitHub → Azure (no stored publish profile), set up after Mat's repo-location decision.
 - The mechanism for the backup heartbeat (Azure Monitor custom check, a healthcheck service or similar).
 - Infrastructure as az CLI scripts or Bicep. Either is fine if it's committed and re-runnable.
+
+## 7. As built (2026-11-24)
+
+Mat created the core resources by hand in the Azure portal. This section records what exists. It never records passwords, connection strings, subscription or object IDs, or IP addresses. `scripts/azure/provision.sh` converges the rest against these names (`azure.env.example` carries them); see the runbook R1.0.
+
+**Subscription and region.** Pay-As-You-Go subscription "Azure subscription 1", resource group `DataApplication`, region **East US 2** (§4).
+
+**PostgreSQL Flexible Server `addisenergy-db`** (`addisenergy-db.postgres.database.azure.com`)
+
+| Setting | Value | Note |
+|---|---|---|
+| Version | PostgreSQL 18 (server 18.6) | matches the lab PC |
+| Compute | Burstable Standard_B2s (2 vCores, 4 GiB) | about 414 user connections; one uvicorn worker (§5.1) |
+| Storage | 32 GiB Premium SSD (P4), autogrow on | about $53/month list in total |
+| High availability | off | |
+| Backups | 35-day retention; geo-redundant **off** (permanent); immutable off | §5.6 |
+| Authentication | PostgreSQL and Microsoft Entra | password admin `addisadmin`; Entra admin Mat |
+| Networking | public access (allowed IPs) plus private endpoints (permanent mode); "Allow public access from any Azure service" **off** | one firewall rule so far, for the machine that created the server |
+| Server parameters | `timezone = America/New_York`; `azure.extensions` includes `pg_trgm`, `uuid-ossp` | |
+
+The portal wizard defaulted to General Purpose D4ds_v5 with HA and Premium SSD v2, about $549/month. Premium SSD v2 hides the Burstable tier, so storage had to be switched to Premium SSD first.
+
+**Database and roles** (created by hand with the SQL now in `scripts/azure/roles.sql` and `grants.sql`):
+- Database `experiments`, owner `experiments_app`.
+- `experiments_app`: LOGIN; owns the database and everything restored or migrated; time zone `America/New_York`. It is used by the app's `DATABASE_URL`, the deploy workflow's migration step and `pg_restore`.
+- `reporting_reader`: NOLOGIN group; CONNECT on `experiments`, USAGE on `public`; default privileges from `experiments_app` for SELECT on tables and sequences (confirmed in `pg_default_acl`).
+- `lab_backup`: LOGIN, a member of `reporting_reader`, time zone set. Used by the lab PC's `backup.ps1`.
+- `addisadmin` is a member of `experiments_app`, which PG 16+ requires before it can create a database owned by that role.
+- Extensions `pg_trgm` and `uuid-ossp` were created as `experiments_app`.
+- Researcher logins on request: `CREATE ROLE <name> LOGIN IN ROLE reporting_reader`, then `\password <name>`, plus a firewall rule named after the person (`scripts/azure/grant_db_access.sh`).
+- After each restore, once: `GRANT SELECT ON ALL TABLES` and `ON ALL SEQUENCES IN SCHEMA public TO reporting_reader` (`grants.sql`).
+
+**App Service `addisenergy-lab`**
+- Linux, Python 3.13, Basic B1 (1.75 GB), plan `ASP-DataApplication-965e`, East US 2, about $12.41/month. Application Insights is on (`addisenergy-lab`).
+- **Secure unique default hostname** is on. The default address is `addisenergy-lab-<random>.eastus2-01.azurewebsites.net`, not `addisenergy-lab.azurewebsites.net`. That exact host is the GoDaddy CNAME target and a Firebase authorized domain.
+- Basic-auth publishing is disabled. The portal's continuous deployment is **not** enabled: its generated workflow neither builds the frontend nor runs migrations, so `.github/workflows/deploy-azure.yml` is used instead.
+
+**GitHub.** The repo was transferred to `Addis-Energy/experiment-tracking-sandbox` (Free organization) on 2026-11-23, before any OIDC credential exists.
+
+**Still open** (runbook R1.0 unless noted):
+1. App Service configuration:
+   - Startup command `python -m uvicorn backend.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1`.
+   - Always On; HTTPS only; minimum TLS 1.2; FTP and SCM basic auth off.
+   - App settings: `DATABASE_URL`, `TZ=America/New_York`, the `FIREBASE_*` settings, `CORS_ORIGINS=https://data.addisenergy.com`, `SCM_DO_BUILD_DURING_DEPLOYMENT=true` and the photo settings.
+   - `ENABLE_API_DOCS` is not set.
+2. Database firewall: add the app's outbound and additional outbound IPs. Confirm whether the existing rule is the HQ IP; add `hq` and `admin` rules as needed.
+3. Storage account (LRS, anonymous access off) with private containers `sample-photos` and `heartbeat`. The app's system-assigned identity gets Storage Blob Data Contributor.
+4. DNS through the colleague at GoDaddy:
+   - `CNAME data -> <default host>` and `TXT asuid.data -> <custom domain verification ID>`.
+   - A CAA check: DigiCert must be allowed.
+   - Then the custom domain and an App Service Managed Certificate (SNI).
+   - Firebase authorized domains: `data.addisenergy.com` and the default host.
+5. Michael Alexander as a second subscription Owner; budget alert at about $120/month; optionally a CanNotDelete lock on the resource group.
+6. Mat needs admin on the transferred repo (GitHub left him with write access). Then the OIDC credential for `repo:Addis-Energy/experiment-tracking-sandbox:ref:refs/heads/main`, the repo secrets and variables, and the first deploy.
+7. Rehearsal the week of 2026-11-30; switch Thursday 2026-12-03; fallback 2026-12-10.

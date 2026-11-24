@@ -953,3 +953,18 @@ Alembic `b8c4e2d7f9a1`; the 2026-09-08 entry above (dual-write).
 **Why:** after the #154 navigation sweep users still could not tell the segment page from the run page: the two showed different columns, charts and default tabs, and which one opened depended on what was clicked. A run with one segment had both pages for what the user sees as one experiment.
 
 **Open:** the Experiments list Description column minimum is 16rem, not the spec's first-draft 20rem (an implementation ruling, to confirm with Mat).
+
+## 2026-11-24 — Azure as built: region, tiers, networking, roles (#196)
+
+**Decision (Mat, building in the Azure portal, 2026-11-24):** the core resources exist and differ from the 2026-11-17 design in a few places. Recorded in the spec §7 (`docs/superpowers/specs/2026-11-17-azure-migration-design.md`); scripts and runbook now match.
+
+- **Region:** East US 2 for everything. East US refused PostgreSQL Flexible Server on the new subscription (a capacity restriction).
+- **Tiers and cost:** Postgres 18 Burstable B2s, 32 GiB Premium SSD (P4), HA off, about $53/month list. App Service Basic B1 on Linux/Python 3.13, about $12.41/month. Budget alert about $120/month. Premium SSD v2 is avoided because it hides the Burstable tier, and the wizard's General Purpose + HA default would have cost about $549/month.
+- **Backups:** 35-day retention; **geo-redundant backup off**. That is permanent, since it can only be set at creation. The off-Azure copy is the nightly lab PC dump to SharePoint. This reverses the spec's earlier "on".
+- **Networking:** public access through named firewall rules plus private endpoints (a creation-time mode; no endpoint yet). There is no "Allow Azure services" rule. Postgres sign-in accepts passwords and Entra (Entra admin Mat); every app role uses a password.
+- **Roles:** `experiments_app` owns the database and everything in it. `reporting_reader` is the read-only group, granted SELECT on tables and sequences through `ALTER DEFAULT PRIVILEGES FOR ROLE experiments_app`, because `event_listeners.py` rebuilds every `v_*` view at import and wipes plain grants. The backup login is **`lab_backup`**, a member of `reporting_reader`. It replaces the earlier `experiments_backup`, which had its own grants. The password admin is `addisadmin`, a member of `experiments_app` (PG 16+ needs that to assign the DB owner).
+- **Timezone:** server parameter `timezone = America/New_York`, plus `ALTER ROLE ... SET timezone` on `experiments_app` and `lab_backup`, plus app setting `TZ`. The locked parsers write naive datetimes, and UTC would store post-switch uploads a day early.
+- **App address:** "Secure unique default hostname" is on, so the default host has a random suffix (`addisenergy-lab-<random>.eastus2-01.azurewebsites.net`). The CNAME target and the Firebase authorized domain use that exact value.
+- **GitHub:** the repo moved to the Free `Addis-Energy` organization (2026-11-23) before any OIDC credential exists. The Team plan is only needed for protection rules or environments on a private repo.
+
+**Why:** these record a hand-built environment so a later rebuild, the rehearsal and the switch run against what actually exists, not against the first design.
