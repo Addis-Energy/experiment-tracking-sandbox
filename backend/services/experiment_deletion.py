@@ -34,9 +34,11 @@ them have no usable DB-level protection:
      data was migrated to experiment_notes by data migration 021 and is
      counted under notes, and the database unlinks any row still pointing
      here. The table is dropped in E2.
-  4. Replicate children -- parent_experiment_fk is dropped, nothing else. Their
-     base_experiment_id and replicate_label stay, because replicate groups are
-     addressed by the base-ID string (issue #87). A DECOUPLING, not a purge.
+  4. Replicate children -- parent_experiment_fk is re-pointed at the deleted
+     experiment's own parent (NULL for a root), and their run's cumulative
+     times are recalculated (issue #137). Their base_experiment_id and
+     replicate_label stay, because replicate groups are addressed by the
+     base-ID string (issue #87). A DECOUPLING, not a purge.
   5. elemental_analysis -- external_analysis_id is nullable=False, yet the
      relationship (characterization.py:43) is a bare backref with no cascade and
      no passive_deletes. When the ORM cascade-deletes this experiment's
@@ -86,6 +88,7 @@ from database.models.xrd import XRDPhase
 from backend.services.audit import audit_jsonable
 from backend.services.experiment_lookup import lowest_conditions
 from backend.services.h2_background import groups_using_background
+from backend.services.result_merge_utils import update_cumulative_times_for_chain
 
 log = structlog.get_logger(__name__)
 
@@ -324,14 +327,24 @@ def delete_experiment_cascade(
             .where(ElementalAnalysis.external_analysis_id.in_(ext_ids))
         )
 
-    # 4. Replicate children: drop the parent pointer explicitly rather than
-    #    relying on the DB SET NULL. base_experiment_id is untouched, so the
-    #    group stays addressable by string (MODELS.md, issue #87).
+    # 4. Replicate children: re-point the parent pointer at this experiment's
+    #    own parent explicitly rather than relying on the DB SET NULL. Deleting
+    #    a middle run segment (HPHT_068-2) thus leaves -3 the child of HPHT_068;
+    #    a bare NULL made -3 a new root, so the next chain recalculation dropped
+    #    every earlier segment's days (issue #137, Mat 2026-11-24). Its run is
+    #    recalculated after the delete below. base_experiment_id is untouched,
+    #    so the group stays addressable by string (MODELS.md, issue #87).
+    child_pks: list[int] = []
     if impact.replicate_children:
+        new_parent = exp.parent_experiment_fk if exp.parent_experiment_fk != exp_pk else None
+        child_pks = list(db.execute(
+            select(Experiment.id)
+            .where(Experiment.parent_experiment_fk == exp_pk, Experiment.id != exp_pk)
+        ).scalars())
         db.execute(
             update(Experiment)
             .where(Experiment.parent_experiment_fk == exp_pk, Experiment.id != exp_pk)
-            .values(parent_experiment_fk=None)
+            .values(parent_experiment_fk=new_parent)
         )
 
     # 5. The audit trail -- experiment_fk=None so it outlives the experiment.
@@ -379,6 +392,12 @@ def delete_experiment_cascade(
     ).scalars().all()
 
     db.delete(exp)
+    # Item 4: with this experiment's results gone, recompute the run its
+    # children belong to, so their offsets drop its days now and stay that way.
+    if child_pks:
+        db.flush()
+        for child_pk in child_pks:
+            update_cumulative_times_for_chain(db, child_pk)
     db.commit()
     del preloaded
 

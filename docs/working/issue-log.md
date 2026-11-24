@@ -3257,3 +3257,12 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Files changed:** `frontend/src/components/results/ScalarExtras.tsx`, `frontend/src/pages/ExperimentDetail/__tests__/ResultsTab.columns.test.tsx`, `docs/user_guide/USER_MANUAL.md` (+ `project_context` copy), `docs/working/issue-log.md`
 - **Tests added:** no (one assertion updated; vitest ExperimentDetail, results, Hpht: 244 passed)
 - **Decision logged:** no
+
+## 2026-11-24 | issue #137 — POST /api/results and segment deletion keep a run's cumulative times right (`fix/issue-137-post-results-cumulative`)
+- **What changed:**
+  - `POST /api/results` now calls `update_cumulative_times_for_chain` before commit, like every other result write path.
+  - Criterion 2 (update/delete paths): the result PATCH cannot change the day (`ResultEntryUpdate`), so no change there. Deleting an experiment did break the run: it set the children's `parent_experiment_fk` to NULL, making a later segment a new root, so the next write anywhere in the run reset its cumulative time to its own day and lost every earlier segment's days (reproduced: 9/12 → 1/4). Mat chose (2026-11-24) to re-link children to the deleted experiment's own parent and recalculate the run: the deleted segment's days stop counting, the earlier ones still do.
+  - Dev DB (2026-10-26 backup): no logged delete ever hit a run segment, so no backfill. Unrelated finding: CF_026 and CF_027 each have two roots (`CF_026` and `CF_026-1`, no parent), so `-1` onward restarts at day 0. Raised with Mat separately.
+- **Files changed:** `backend/api/routers/results.py`, `backend/services/experiment_deletion.py`, `tests/api/test_results.py`, `tests/services/test_experiment_deletion.py`, `docs/CALCULATIONS.md`, `docs/api/API_REFERENCE.md` (+ `project_context` copies), `.claude/rules/MODELS-deletion.md`, `docs/working/issue-log.md`
+- **Tests added:** yes, 2 (both watched failing first). Scoped suite (services, regression, api, models, views, data_migrations): 1963 passed.
+- **Decision logged:** yes, in `CALCULATIONS.md` ("Deleting a segment")

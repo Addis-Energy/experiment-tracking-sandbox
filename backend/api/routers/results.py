@@ -15,7 +15,7 @@ from backend.api.schemas.results import (
     ScalarResponse, ICPCreate, ICPResponse,
 )
 from backend.services.result_merge_utils import (
-    resolve_primary_timepoint,
+    resolve_primary_timepoint, update_cumulative_times_for_chain,
 )
 
 log = structlog.get_logger(__name__)
@@ -79,9 +79,10 @@ def create_result(
 ) -> ResultResponse:
     """Create a new result timepoint for an experiment.
 
-    Not for UI use (issue #146): it commits on its own, never sets cumulative
-    time and writes no audit row. Kept for Master Results tooling and tests.
-    UI callers use POST /api/experiments/{experiment_id}/results.
+    Not for UI use (issue #146): it commits on its own and writes no audit row.
+    Kept for Master Results tooling and tests. UI callers use
+    POST /api/experiments/{experiment_id}/results. It does update the chain's
+    cumulative times, like every other result write path (issue #137).
     """
     # Validate that experiment_fk references experiments.id (integer PK).
     # The frontend must never pass the string experiment_id in this field.
@@ -105,6 +106,7 @@ def create_result(
     result = ExperimentalResults(**data)
     db.add(result)
     db.flush()
+    update_cumulative_times_for_chain(db, exp.id)
     db.commit()
     db.refresh(result)
     log.info("result_created", experiment_fk=result.experiment_fk, result_id=result.id)

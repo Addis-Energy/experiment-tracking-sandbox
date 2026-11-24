@@ -547,9 +547,11 @@ Decoupled but **not** destroyed — a deletion never touches another experiment'
 data: other experiments' `scalar_results` that cite this one as their ammonium
 background have `background_experiment_id` / `background_experiment_fk` cleared
 while the row and its `background_ammonium_concentration_mM` value survive; and
-replicate siblings lose only `parent_experiment_fk`, keeping
-`base_experiment_id` and `replicate_label` so the group stays addressable by
-string (issue #87).
+children (replicates or later run segments) have `parent_experiment_fk`
+re-pointed at the deleted experiment's own parent (NULL when it was a root),
+keeping `base_experiment_id` and `replicate_label` so the group stays
+addressable by string (issue #87). Their run's cumulative times are then
+recalculated, so a deleted middle segment's days stop counting (issue #137).
 
 **Returns `200` with a body, not `204`** — the caller needs to know what was
 decoupled:

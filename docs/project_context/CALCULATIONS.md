@@ -44,7 +44,9 @@ there; do not write these numbers inline. The module sits outside the `calculati
 package to avoid a circular import with `elemental_composition_service`. The SQL
 views keep their own copies of the H2 and Fe values, guarded by tests.
 
-**Cumulative time on hand-entered rows (issue #146).** `cumulative_time_post_reaction_days` is not a registry formula; `update_cumulative_times_for_chain` (`backend/services/result_merge_utils.py`) sets it. Since #146, hand-entered samples from the UI (`POST /api/experiments/{experiment_id}/results` and the Core Flood sample routes, both through `backend/services/result_entry_service.py`) always call it, so they get a cumulative time. Rows created with the older `POST /api/results` still get none. No formula changed.
+**Cumulative time on hand-entered rows (issue #146).** `cumulative_time_post_reaction_days` is not a registry formula; `update_cumulative_times_for_chain` (`backend/services/result_merge_utils.py`) sets it. Since #146, hand-entered samples from the UI (`POST /api/experiments/{experiment_id}/results` and the Core Flood sample routes, both through `backend/services/result_entry_service.py`) always call it, so they get a cumulative time. Since #137 the older `POST /api/results` calls it too. No formula changed.
+
+**Deleting a segment (issue #137, decided by Mat, 2026-11-24).** An experiment's offset is the summed last-sample days of the ancestors reached through `parent_experiment_fk`. Deleting a middle segment (`HPHT_068-2`) re-points its children at its own parent (`HPHT_068-3` becomes the child of `HPHT_068`) and recalculates the run, so **the deleted segment's days stop counting** and every earlier segment's still do. Before #137 the child's pointer was set to NULL, which made it a new root: its stored times kept the old offset until the next write anywhere in the run, then dropped to the segment's own day, losing the earlier segments as well.
 
 ---
 
