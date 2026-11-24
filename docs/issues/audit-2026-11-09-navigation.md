@@ -1,5 +1,10 @@
 # Navigation audit, 2026-11-09 — Dashboard, Experiments, Detail, Group, HPHT run, Core Flood run
 
+> **Historical snapshot (merged 2026-11-24).** Every `file:line` below is as of
+> develop `91cc2e7` and is now stale. All 24 improvements were specced in epic
+> #154 and built in sub-issues #155–#163 (all closed). Read this document as the
+> record of why those changes were made, not as a description of the current code.
+
 Read-only audit of the links between the six pages a researcher moves between
 every day. Method: (1) a route/entity map from `frontend/src/App.tsx`, (2) a
 link graph built from every `<Link>`, `navigate()` and row `onClick` under

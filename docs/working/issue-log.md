@@ -3243,3 +3243,9 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Files changed:** `docs/superpowers/specs/2026-11-17-azure-migration-design.md`, `docs/deployment/AZURE_RUNBOOK.md`, `docs/PSQL_ACCESS.md`, `scripts/azure/{roles.sql,grants.sql,provision.sh,azure.env.example,grant_db_access.sh,revoke_db_access.sh}`, `docs/working/decisions.md`
 - **Tests added:** no (docs and SQL/shell scripts; `bash -n` on the shell scripts)
 - **Decision logged:** yes — decisions.md 2026-11-24
+
+## 2026-11-24 | inline (#153) — merge the 2026-11-09 navigation audit as a historical record (`chore/navigation-audit`)
+- **What changed:** PR #153 had stayed open after epic #154 and #155–#163 shipped, so the epic's link to `docs/project_context/audit-2026-11-09-navigation.md` pointed at nothing. Added a historical-snapshot note (citations as of `91cc2e7`, all NAV items built) and merged.
+- **Files changed:** `docs/issues/audit-2026-11-09-navigation.md` (+ `docs/project_context/` copy), `docs/working/issue-log.md`
+- **Tests added:** no (docs only)
+- **Decision logged:** no
