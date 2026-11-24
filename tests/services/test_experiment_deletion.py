@@ -476,3 +476,51 @@ def test_delete_keeps_the_h2_background_link_row(db):
     assert db.execute(select(func.count()).select_from(H2BackgroundLink)
                       .where(H2BackgroundLink.base_experiment_id == "SERUM_012")
                       ).scalar_one() == 1
+
+
+def test_delete_middle_segment_relinks_and_recalculates_the_run(db):
+    """Issue #137 (Mat, 2026-11-24): deleting a middle segment re-links the later
+    segment to the deleted one's parent and recalculates the run, so the deleted
+    segment's days stop counting and the earlier segments' days still do -- and
+    the result survives the next chain recalculation."""
+    from backend.services.experiment_deletion import delete_experiment_cascade
+    from backend.services.result_merge_utils import update_cumulative_times_for_chain
+
+    chain: list[Experiment] = []
+    for level in range(3):
+        exp = Experiment(
+            experiment_id="DEL_RUN_001" if level == 0 else f"DEL_RUN_001-{level + 1}",
+            experiment_number=7300 + level, status=ExperimentStatus.ONGOING,
+            base_experiment_id="DEL_RUN_001",
+            parent_experiment_fk=chain[-1].id if chain else None,
+        )
+        db.add(exp)
+        db.flush()
+        for day in (1.0, 4.0):
+            db.add(ExperimentalResults(experiment_fk=exp.id, time_post_reaction_days=day,
+                                       time_post_reaction_bucket_days=day,
+                                       is_primary_timepoint_result=True))
+        chain.append(exp)
+    db.flush()
+    update_cumulative_times_for_chain(db, chain[0].id)
+    db.commit()
+    seg1, seg2, seg3 = chain
+    seg1_id, seg3_id = seg1.id, seg3.id
+
+    def cum(exp_pk):
+        return sorted(r.cumulative_time_post_reaction_days for r in db.execute(
+            select(ExperimentalResults).where(ExperimentalResults.experiment_fk == exp_pk)
+        ).scalars())
+
+    assert cum(seg3_id) == [9.0, 12.0]
+    delete_experiment_cascade(db, seg2, modified_by="tester@addisenergy.com")
+    db.expire_all()
+
+    assert db.get(Experiment, seg3_id).parent_experiment_fk == seg1_id
+    assert cum(seg1_id) == [1.0, 4.0]
+    assert cum(seg3_id) == [5.0, 8.0]          # seg1's 4 days, seg2's gone
+
+    update_cumulative_times_for_chain(db, seg1_id)   # the next write in the run
+    db.commit()
+    db.expire_all()
+    assert cum(seg3_id) == [5.0, 8.0]

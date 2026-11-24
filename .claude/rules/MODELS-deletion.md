@@ -70,7 +70,11 @@ Defined across `backend/services/experiment_deletion.py` (single) and `backend/s
       is nullable with no reverse collection.)
 
     Replicate children keep their `base_experiment_id` and `replicate_label`; only
-    `parent_experiment_fk` is dropped — also a **DECOUPLING, never a purge**.
+    `parent_experiment_fk` changes — re-pointed at the deleted experiment's own
+    parent (NULL for a root), then the run's cumulative times are recalculated
+    (issue #137, Mat 2026-11-24). A bare NULL made a later run segment a new root,
+    so the next chain recalculation silently dropped every earlier segment's days.
+    Also a **DECOUPLING, never a purge**.
     Groups are addressed by the base-ID *string* (issue #87), so the group page and
     `v_results_scalar_rollup` are unaffected — the affected IDs are reported in the
     response so the researcher is told.

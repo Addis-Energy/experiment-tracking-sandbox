@@ -462,3 +462,53 @@ def test_create_result_ignores_legacy_text_fields_and_writes_no_notes(client, db
     assert "description" not in body
     assert "brine_modification_description" not in body
     assert _notes_for(db_session, body["id"]) == []
+
+
+def _chain3(db):
+    """RESCHAIN_001 -> -2 -> -3, each with results at days 1 and 4, cumulative times set."""
+    from backend.services.result_merge_utils import update_cumulative_times_for_chain
+
+    chain = []
+    for level in range(3):
+        exp = Experiment(
+            experiment_id="RESCHAIN_001" if level == 0 else f"RESCHAIN_001-{level + 1}",
+            experiment_number=6100 + level, status=ExperimentStatus.ONGOING,
+            base_experiment_id="RESCHAIN_001",
+            parent_experiment_fk=chain[-1].id if chain else None,
+        )
+        db.add(exp)
+        db.flush()
+        for day in (1.0, 4.0):
+            db.add(ExperimentalResults(experiment_fk=exp.id, time_post_reaction_days=day,
+                                       time_post_reaction_bucket_days=day,
+                                       is_primary_timepoint_result=True))
+        chain.append(exp)
+    db.flush()
+    update_cumulative_times_for_chain(db, chain[0].id)
+    db.commit()
+    return chain
+
+
+def _cum(db, exp):
+    return sorted((r.cumulative_time_post_reaction_days
+                   for r in db.query(ExperimentalResults).filter_by(experiment_fk=exp.id)),
+                  key=lambda v: (v is None, v or 0.0))
+
+
+def test_create_result_updates_chain_cumulative_times(client, db_session):
+    """Issue #137: POST /api/results on a middle segment sets the new row's
+    cumulative time and shifts every downstream segment."""
+    seg1, seg2, seg3 = _chain3(db_session)
+    assert _cum(db_session, seg3) == [9.0, 12.0]   # 4 + 4 + day
+
+    resp = client.post("/api/results", json={
+        "experiment_fk": seg2.id,
+        "time_post_reaction_days": 6.0,
+        "is_primary_timepoint_result": True,
+    })
+    assert resp.status_code == 201
+
+    db_session.expire_all()
+    assert _cum(db_session, seg1) == [1.0, 4.0]
+    assert _cum(db_session, seg2) == [5.0, 8.0, 10.0]    # new day-6 row: 4 + 6
+    assert _cum(db_session, seg3) == [11.0, 14.0]        # offset is now 4 + 6
