@@ -4,33 +4,6 @@ from typing import Optional
 from pydantic import BaseModel
 from database.models.enums import ExperimentStatus
 
-
-class ReactorStatusResponse(BaseModel):
-    """Legacy response — kept for backwards-compat with /reactor-status endpoint."""
-    reactor_number: int
-    experiment_id: Optional[str] = None
-    status: Optional[ExperimentStatus] = None
-    experiment_db_id: Optional[int] = None
-    started_at: Optional[datetime] = None
-    temperature_c: Optional[float] = None
-    experiment_type: Optional[str] = None
-
-
-class TimelinePoint(BaseModel):
-    result_id: int
-    time_post_reaction_days: Optional[float] = None
-    time_post_reaction_bucket_days: Optional[float] = None
-    is_primary: bool
-    has_scalar: bool
-    has_icp: bool
-
-
-class ExperimentTimelineResponse(BaseModel):
-    experiment_id: str
-    status: Optional[ExperimentStatus] = None
-    timepoints: list[TimelinePoint]
-
-
 # ── M7 full-dashboard schemas ────────────────────────────────────────────────
 
 class SlotOccupancy(BaseModel):
@@ -89,6 +62,13 @@ class ReactorCardData(BaseModel):
     # Issue #122 PR-B: both read 'modification' notes, not the retired change-request table.
     todays_modification: Optional[str] = None   # notes with event_date == today (UTC), '; '-joined in id order
     latest_modification: Optional[LatestModification] = None
+    # Issue #165: read from the run's samples view (v_hpht_samples for R/P,
+    # v_core_flood_samples for CF), over every segment of the card's base ID.
+    # Both come from the run's LAST non-variant sample in view order; None if
+    # the card has no base ID, the run has no samples, or (for the date) that
+    # sample has no sample_date. No fallback to an earlier dated sample.
+    last_sampled_date: Optional[date] = None             # lab-local (LAB_TZ) calendar date
+    cumulative_h2_grams_per_ton: Optional[float] = None  # run H2 to date, g/t
 
 
 class GanttEntry(BaseModel):

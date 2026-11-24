@@ -452,6 +452,76 @@ def test_icp_oes_reports_skips_when_nothing_parses(client):
     assert body["skipped"] == 1
     assert len(body["warnings"]) == 1
     assert "HPHT_232_21x" in body["warnings"][0]
+    # Issue #162: nothing was written, so nothing is touched.
+    assert body["touched"] == []
+
+
+def _seed_icp_targets(db):
+    """Two experiments the ICP labels below resolve to (issue #162)."""
+    from database.models import Experiment  # noqa: PLC0415
+    from database.models.enums import ExperimentStatus  # noqa: PLC0415
+    for n, exp_id in enumerate(("HPHT_9902", "HPHT_9901")):
+        db.add(Experiment(experiment_id=exp_id, experiment_number=99901 + n,
+                          status=ExperimentStatus.ONGOING))
+    db.flush()
+
+
+_TOUCHED_LABELS = ("HPHT_9902_Day1_21x", "HPHT_9901_Day3_21x", "HPHT_9901_Day1_21x")
+_TOUCHED = [
+    {"experiment_id": "HPHT_9901", "time_post_reaction_days": 1.0},
+    {"experiment_id": "HPHT_9901", "time_post_reaction_days": 3.0},
+    {"experiment_id": "HPHT_9902", "time_post_reaction_days": 1.0},
+]
+
+
+def test_icp_oes_touched_lists_each_experiment_and_day(client, db_session):
+    """Issue #162: the response names the experiments and days written to,
+    sorted by experiment ID then day, whatever the CSV order."""
+    _seed_icp_targets(db_session)
+    resp = client.post(
+        "/api/bulk-uploads/icp-oes",
+        files={"file": ("icp.csv", io.BytesIO(_icp_csv(*_TOUCHED_LABELS)), "text/csv")},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["errors"] == []
+    assert body["created"] == 3
+    assert body["touched"] == _TOUCHED
+
+
+def test_icp_oes_touched_includes_updated_timepoints_once(client, db_session):
+    """A second upload of the same timepoint is an update: still touched, listed once."""
+    _seed_icp_targets(db_session)
+    csv = _icp_csv("HPHT_9901_Day1_21x")
+    client.post("/api/bulk-uploads/icp-oes",
+                files={"file": ("icp.csv", io.BytesIO(csv), "text/csv")})
+    resp = client.post("/api/bulk-uploads/icp-oes",
+                       files={"file": ("icp.csv", io.BytesIO(csv), "text/csv")})
+    body = resp.json()
+    assert body["updated"] == 1
+    assert body["touched"] == [_TOUCHED[0]]
+
+
+def test_icp_oes_dry_run_reports_touched_without_committing(client, db_session):
+    _seed_icp_targets(db_session)
+    with patch.object(db_session, "commit") as mock_commit:
+        resp = client.post(
+            "/api/bulk-uploads/icp-oes",
+            files={"file": ("icp.csv", io.BytesIO(_icp_csv(*_TOUCHED_LABELS)), "text/csv")},
+            data={"dry_run": "true"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["dry_run"] is True
+    assert body["touched"] == _TOUCHED
+    mock_commit.assert_not_called()
+
+
+def test_other_uploads_default_touched_to_empty(client):
+    """touched is ICP-only for now; every other endpoint returns []."""
+    from backend.api.schemas.bulk_upload import UploadResponse  # noqa: PLC0415
+    assert UploadResponse(created=0, updated=0, skipped=0, errors=[],
+                          message="x").touched == []
 
 
 def test_icp_oes_returns_upload_response_shape(client):
@@ -488,7 +558,11 @@ def test_icp_oes_dry_run_rolls_back(client, db_session):
     stub_vc.ICP_FIXED_ELEMENT_FIELDS = ["fe", "si", "mg"]
     mock_icp = MagicMock()
     mock_icp.parse_and_process_icp_file_ex.return_value = ([{"experiment_fk": 1}], [], [], 0)
-    mock_icp.bulk_create_icp_results.return_value = ([MagicMock()], 0, [])
+    # The row needs a real experiment ID and day: the router builds `touched`
+    # from them (issue #162), and a bare MagicMock fails validation there.
+    row = MagicMock(time_post_reaction_days=1.0)
+    row.experiment.experiment_id = "HPHT_9901"
+    mock_icp.bulk_create_icp_results.return_value = ([row], 0, [])
     fake_mod = MagicMock()
     fake_mod.ICPService = mock_icp
 
@@ -1399,8 +1473,8 @@ def test_pxrf_upload_no_change_when_no_matching_readings(client, db_session):
 def test_pxrf_data_importable_without_utils_storage():
     """pxrf_data must not require utils.storage at import time.
 
-    The API uses ingest_from_bytes; utils.storage is only needed by
-    ingest_from_source (legacy file-path loader). A top-level import
+    The API uses ingest_from_bytes. The only user of utils.storage was
+    ingest_from_source, deleted in issue #189. A top-level import of it
     causes ModuleNotFoundError in production → HTTP 500 on first upload.
     """
     import importlib
@@ -1417,7 +1491,7 @@ def test_pxrf_data_importable_without_utils_storage():
     except ModuleNotFoundError as exc:
         raise AssertionError(
             f"pxrf_data raised ModuleNotFoundError on import: {exc}\n"
-            "Move 'from utils.storage import get_file' inside ingest_from_source."
+            "pxrf_data must not import utils.storage (ingest_from_source is gone)."
         ) from exc
     finally:
         # Restore saved stubs first
@@ -1470,3 +1544,60 @@ def test_new_experiments_template_has_is_background(client):
     notes = {r[0].value: r[1].value for r in inst.iter_rows(min_row=1) if r[0].value}
     assert "background" in notes["is_background"]
     assert "inherits" in notes["is_background"]
+
+
+# ── Issue #190 (D-12): the shared failed-upload response ─────────────────────
+
+def test_upload_failed_rolls_back_and_returns_the_all_zero_response():
+    from unittest.mock import MagicMock
+
+    from backend.api.routers.bulk_uploads import _upload_failed
+
+    db = MagicMock()
+    resp = _upload_failed(db, "sweep190_upload_failed", ValueError("bad sheet"))
+    db.rollback.assert_called_once_with()
+    assert (resp.created, resp.updated, resp.skipped) == (0, 0, 0)
+    assert resp.errors == ["bad sheet"]
+    assert resp.message == "Upload failed"
+
+    custom = _upload_failed(MagicMock(), "sweep190_delete_failed", RuntimeError("x"),
+                            message="Bulk deletion failed", user="someone@addisenergy.com")
+    assert custom.message == "Bulk deletion failed"
+
+
+# ── Issue #190 (D-14): one installer for the variable_config stub ────────────
+
+def test_ensure_variable_config_installs_the_stub_and_keeps_existing_values():
+    from backend.api.routers.bulk_uploads import _VARIABLE_CONFIG, _ensure_variable_config
+
+    names = ("frontend", "frontend.config", _VARIABLE_CONFIG)
+    saved = {k: sys.modules.pop(k) for k in names if k in sys.modules}
+    try:
+        _ensure_variable_config("SWEEP190_A", lambda: {"x": 1})
+        module = sys.modules[_VARIABLE_CONFIG]
+        assert module.SWEEP190_A == {"x": 1}
+        assert "frontend" in sys.modules and "frontend.config" in sys.modules
+
+        # An attribute that is already set wins; the default is not even built.
+        def _must_not_run():
+            raise AssertionError("default built although the attribute exists")
+        _ensure_variable_config("SWEEP190_A", _must_not_run)
+        assert module.SWEEP190_A == {"x": 1}
+
+        # A second attribute lands on the same module object.
+        _ensure_variable_config("SWEEP190_B", lambda: [1, 2])
+        assert sys.modules[_VARIABLE_CONFIG] is module and module.SWEEP190_B == [1, 2]
+    finally:
+        for k in names:
+            sys.modules.pop(k, None)
+        sys.modules.update(saved)
+
+
+def test_variable_config_defaults_match_what_the_parsers_expect():
+    from backend.api.routers import bulk_uploads as router
+    from backend.api.schemas.results import ICP_ELEMENTS
+
+    assert router._icp_fixed_element_fields() == list(ICP_ELEMENTS)
+    assert router._SCALAR_RESULTS_TEMPLATE_HEADERS["experiment_id"] == "Experiment ID"
+    assert len(router._SCALAR_RESULTS_TEMPLATE_HEADERS) == 20
+    assert "Reading No" in router._PXRF_REQUIRED_COLUMNS and len(router._PXRF_REQUIRED_COLUMNS) == 12

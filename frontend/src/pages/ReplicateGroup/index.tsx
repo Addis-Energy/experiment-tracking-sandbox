@@ -20,10 +20,13 @@ import {
   Th,
   Td,
   PageSpinner,
+  Breadcrumb,
 } from '@/components/ui'
+import { SegmentLink } from '@/components/runs/SegmentLink'
 import { GroupedResultsView } from '@/pages/ExperimentDetail/GroupedResultsView'
 import { H2BackgroundRow } from './H2BackgroundRow'
 import { isSerumType } from '@/utils/experimentId'
+import { formatNumber, formatPrecise } from '@/utils/numberFormat'
 
 const READ_ONLY_NOTICE =
   'Replicates are edited individually; only the H₂ background is set here.'
@@ -35,18 +38,17 @@ function formatFieldName(field: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
-function formatValue(value: unknown): string {
+/** Shared-condition fields shown up to 3 dp (Mat, 2026-11-12: small set points). */
+const PRECISE_FIELDS = new Set(['catalyst_ppm'])
+
+/** Display text for a condition value. `precise` keeps up to 3 dp: the divergent
+ *  columns exist to show how replicates differ, and 1 dp could hide that. */
+function formatValue(value: unknown, precise = false): string {
   if (value === null || value === undefined || value === '') return '—'
   if (typeof value === 'boolean') return value ? 'Yes' : 'No'
-  if (typeof value === 'number') return formatNumber(value)
+  if (typeof value === 'number') return precise ? formatPrecise(value) : formatNumber(value)
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
-}
-
-/** Rounds to 3 decimal places and trims trailing zeros (0.40888731418072486 -> "0.409", 90 -> "90"). */
-function formatNumber(value: number): string {
-  if (!Number.isFinite(value)) return String(value)
-  return parseFloat(value.toFixed(3)).toString()
 }
 
 function hasValue(value: unknown): boolean {
@@ -123,12 +125,7 @@ function MemberRow({ member, isParent, divergentFields, child }: MemberRowProps)
         {isParent ? '0 (parent)' : (member.replicate_label ?? '—')}
       </Td>
       <Td>
-        <Link
-          to={`/experiments/${member.experiment_id}`}
-          className="font-mono-data text-red-400 hover:text-red-300"
-        >
-          {member.experiment_id}
-        </Link>
+        <SegmentLink id={member.experiment_id} />
         {member.is_background && <Badge variant="info" className="ml-2">Background</Badge>}
       </Td>
       <Td className="font-mono-data">
@@ -136,10 +133,19 @@ function MemberRow({ member, isParent, divergentFields, child }: MemberRowProps)
       </Td>
       <Td>{member.status ? <StatusBadge status={member.status} /> : '—'}</Td>
       <Td>{member.is_outlier ? <Badge variant="warning">Outlier</Badge> : '—'}</Td>
-      <Td className="font-mono-data">{member.result_count}</Td>
+      <Td>
+        {/* Issue #162: the count opens the vial's results, not its Conditions. */}
+        <SegmentLink
+          id={member.experiment_id}
+          tab="results"
+          title={`Open the Results tab of ${member.experiment_id}`}
+        >
+          {member.result_count}
+        </SegmentLink>
+      </Td>
       {divergentFields.map((field) => (
         <Td key={field} className="font-mono-data">
-          {formatValue(member.conditions[field])}
+          {formatValue(member.conditions[field], true)}
         </Td>
       ))}
     </TableRow>
@@ -168,11 +174,13 @@ function ReplicateGroupContent({ group, baseId }: ReplicateGroupContentProps) {
     <div className="space-y-4">
       {/* Header */}
       <div>
-        <p className="text-xs text-ink-muted mb-1">
-          <Link to="/experiments" className="hover:text-ink-secondary">Experiments</Link>
-          <span className="mx-1.5">›</span>
-          <span className="font-mono-data">Group {baseId}</span>
-        </p>
+        <Breadcrumb
+          className="mb-1"
+          items={[
+            { label: 'Experiments', to: '/experiments' },
+            { label: `Group ${baseId}`, mono: true },
+          ]}
+        />
         <div className="flex items-center gap-2">
           <h1 className="text-lg font-semibold text-ink-primary font-mono-data">{baseId}</h1>
           <span className="text-xs text-ink-muted">
@@ -189,6 +197,14 @@ function ReplicateGroupContent({ group, baseId }: ReplicateGroupContentProps) {
         <p className="text-xs text-ink-muted mt-1">{READ_ONLY_NOTICE}</p>
         {showH2Background && <H2BackgroundRow baseId={baseId} link={group.h2_background} />}
       </div>
+
+      {/* Rollup first: the yield is what the page is for (issue #160). */}
+      <Card padding="none">
+        <CardHeader label="Rollup" />
+        <CardBody>
+          <GroupedResultsView baseExperimentId={baseId} />
+        </CardBody>
+      </Card>
 
       {/* Members table */}
       <Table>
@@ -255,7 +271,7 @@ function ReplicateGroupContent({ group, baseId }: ReplicateGroupContentProps) {
               .map(([field, value]) => (
                 <div key={field} className="text-xs">
                   <span className="text-ink-muted">{formatFieldName(field)}: </span>
-                  <span className="font-mono-data text-ink-primary">{formatValue(value)}</span>
+                  <span className="font-mono-data text-ink-primary">{formatValue(value, PRECISE_FIELDS.has(field))}</span>
                 </div>
               ))}
             {group.divergent_fields.map((field) => (
@@ -283,14 +299,6 @@ function ReplicateGroupContent({ group, baseId }: ReplicateGroupContentProps) {
           </div>
         </CardBody>
       </Card>
-
-      {/* Rollup */}
-      <Card padding="none">
-        <CardHeader label="Rollup" />
-        <CardBody>
-          <GroupedResultsView baseExperimentId={baseId} />
-        </CardBody>
-      </Card>
     </div>
   )
 }
@@ -309,7 +317,17 @@ export function ReplicateGroupPage() {
 
   if (isLoading) return <PageSpinner />
   if (isError || !group) {
-    return <p className="text-red-400 text-sm p-6">Replicate group not found</p>
+    return (
+      <div className="space-y-2 p-6">
+        <p className="text-red-400 text-sm">Replicate group not found</p>
+        {/* Issue #159. The list keeps its search box in component state, not
+            the URL, so this cannot pre-fill a search for the base ID yet; see
+            #162 for the search-param pattern. */}
+        <Link to="/experiments" className="text-sm text-red-400 hover:text-red-300">
+          Back to Experiments
+        </Link>
+      </div>
+    )
   }
 
   return <ReplicateGroupContent group={group} baseId={baseId!} />

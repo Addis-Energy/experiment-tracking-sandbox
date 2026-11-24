@@ -66,13 +66,17 @@ Shows all 19 reactor slots:
 
 ### Reactor Detail Modal
 
-Click any occupied reactor slot to open a detail panel showing all card fields in full, plus the experiment start date. A **View Detail →** button navigates to the experiment's full detail page.
+Click any occupied reactor slot to open a detail panel showing all card fields in full, plus the experiment start date. Directly below the Experiment section (issue #157):
+
+- **Open {experiment ID}** (the red, primary button) is the only destination. For an R, P or CF experiment it opens the run page (`/hpht/{base}` or `/core-floods/{base}`) with that experiment selected, whatever the card's status (ongoing, queued or completed); for any other experiment it opens the experiment's own detail page.
+- **Close** closes the panel.
 
 #### Reactor Modification box (issue #122 PR-B, 2026-09-24)
 
-The detail panel's **Reactor Modification** section shows the most recent entry
-(today's included) for this experiment (date + text, read-only) above an editable date field
-(defaults to today) and a text box. "Today" is the lab's calendar day
+The detail panel's **Reactor Modification** section, below the navigation buttons and
+Hardware, shows the most recent entry (today's included) for this experiment (date + text,
+read-only) above **Log a reactor modification note**: an editable date field
+(defaults to today), a text box and a secondary **Save** button. "Today" is the lab's calendar day
 (America/New_York), on both this date field and the server's "Modified today"
 lookup below — not UTC (Mat's ruling, 2026-10-05). Clicking **Save** adds a dated `modification`
 note to the experiment — visible on that experiment's Notes tab — rather than
@@ -92,7 +96,7 @@ Horizontal bar chart showing up to 100 experiments sorted by most-recent start d
 
 - Bar **width** is proportional to experiment duration relative to the longest experiment shown
 - **Colors:** green = ONGOING, teal/blue = COMPLETED, grey = CANCELLED
-- Click any bar to navigate to that experiment's detail page
+- Click any bar to navigate to that experiment's detail page; an HPHT or Core Flood experiment opens its run page instead, with that experiment selected
 - Axis shows 0d / mid / max scale
 
 ### Filtering the Timeline
@@ -115,7 +119,7 @@ Shows the last 20 entries from the modifications audit log:
 
 - **Action** — Created / Updated / Deleted (color-coded)
 - **Table** — which database table was affected
-- **Experiment ID** — click to navigate to the experiment (when available)
+- **Experiment ID** — click to navigate to the experiment (when available). A deleted experiment shows its ID struck through with "deleted" and no link, since its page no longer exists (issue #159)
 - **Who** — the user who made the change (if recorded)
 - **When** — relative time (e.g. "5m ago", "2d ago")
 

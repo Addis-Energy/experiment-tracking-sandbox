@@ -9,7 +9,6 @@ router translates them to HTTP statuses.
 """
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Iterable, Literal
 
 import structlog
@@ -22,7 +21,7 @@ from backend.api.schemas.core_floods import (
 )
 from backend.services import result_entry_service as entry
 from backend.services import run_service as runs
-from backend.services.result_entry_service import CF_PROFILE, _aware
+from backend.services.result_entry_service import CF_PROFILE
 from database.models.conditions import ExperimentalConditions
 from database.reactor_slot import series_prefix
 
@@ -45,6 +44,12 @@ def is_core_flood(conditions: ExperimentalConditions | None) -> bool:
     return conditions is not None and series_prefix(conditions.experiment_type) == "CF"
 
 
+# Every spelling is_core_flood accepts ("Core Flood", "CoreFlood", "CF", in any
+# case or spacing) contains one of these once lower-cased. A SQL pre-filter
+# only; is_core_flood stays the rule (run_service.load_segments).
+CORE_FLOOD_TYPE_CONTAINS = ("core", "cf")
+
+
 _VIEW = "v_core_flood_samples"
 
 
@@ -55,14 +60,8 @@ def fetch_samples(
     return runs.fetch_samples(db, _VIEW, base_ids=base_ids, result_id=result_id)
 
 
-# Shared with the HPHT run page; module names kept for existing importers.
+# Shared with the HPHT run page; the router calls it as svc.attach_notes.
 attach_notes = runs.attach_notes
-run_description = runs.run_description
-
-
-def _load_segments(db: Session, base_id: str | None = None) -> dict[str, list[CoreFloodSegment]]:
-    """Core Flood segments grouped by base_experiment_id (one query)."""
-    return runs.load_segments(db, include=is_core_flood, base_id=base_id)
 
 
 def compute_warnings(
@@ -85,10 +84,18 @@ def compute_warnings(
     return [CoreFloodWarning(code=code, experiment_ids=v) for code, v in found.items() if v]
 
 
+def _resolve(
+    db: Session, requested_id: str,
+) -> tuple[str, list[CoreFloodSegment]]:
+    """Base ID and segments of the core flood run `requested_id` names:
+    a base, segment or variant ID (issue #158). Not-found reports the
+    ID the caller sent."""
+    return runs.resolve_run(db, requested_id, include=is_core_flood, not_found=CoreFloodNotFound,
+                            type_contains=CORE_FLOOD_TYPE_CONTAINS)
+
+
 def get_run(db: Session, base_id: str) -> CoreFloodRun:
-    segments = _load_segments(db, base_id).get(base_id)
-    if not segments:
-        raise CoreFloodNotFound(base_id)
+    base_id, segments = _resolve(db, base_id)
     segments = runs.by_date(segments)
     samples = fetch_samples(db, base_ids=[base_id])
     return CoreFloodRun(
@@ -101,50 +108,32 @@ def get_run(db: Session, base_id: str) -> CoreFloodRun:
 
 def get_run_icp(db: Session, base_id: str) -> list[CoreFloodIcpRow]:
     """ICP-OES readings for a run's samples, in view order; samples without ICP are omitted."""
-    if not _load_segments(db, base_id).get(base_id):
-        raise CoreFloodNotFound(base_id)
+    base_id, _ = _resolve(db, base_id)
     return runs.run_icp(db, _VIEW, base_id)
 
 
 def list_runs(
     db: Session, scope: Literal["active", "all"] = "active", q: str | None = None,
 ) -> list[CoreFloodRunListItem]:
-    by_base = _load_segments(db)
-    samples_by_base: dict[str, list[dict]] = defaultdict(list)
-    for row in fetch_samples(db, base_ids=list(by_base)):
-        samples_by_base[row["run_base_id"]].append(row)
-
-    needle = runs.normalize_query(q)
-    items: list[CoreFloodRunListItem] = []
-    for base_id, segments in by_base.items():
-        description = run_description(segments)
-        if not runs.matches(needle, base_id, segments, description):
-            continue
-        samples = samples_by_base.get(base_id, [])
-        ongoing = runs.ongoing_ids(segments)
-        if scope == "active" and not ongoing:
-            continue
-        real = [r for r in samples if not r["is_variant"]]
-        dates = [_aware(r["sample_date"]) for r in real if r["sample_date"] is not None]
-        items.append(CoreFloodRunListItem(
-            base_id=base_id,
-            description=description,
-            segment_count=len(segments),
-            ongoing_experiment_ids=ongoing,
-            rig=runs.latest_segment(segments).reactor_slot,
-            sample_count=len(real),
-            first_sample_date=min(dates) if dates else None,
-            last_sample_date=max(dates) if dates else None,
-            latest_cumulative_h2_grams_per_ton=(
-                real[-1]["cumulative_h2_grams_per_ton"] if real else None),
-            warning_count=len(compute_warnings(segments, samples)),
-        ))
+    items = [
+        CoreFloodRunListItem(
+            base_id=run.base_id,
+            description=run.description,
+            segment_count=len(run.segments),
+            ongoing_experiment_ids=run.ongoing_experiment_ids,
+            rig=runs.latest_segment(run.segments).reactor_slot,
+            sample_count=len(run.real_samples),
+            first_sample_date=run.first_sample_date,
+            last_sample_date=run.last_sample_date,
+            latest_cumulative_h2_grams_per_ton=run.latest_cumulative_h2_grams_per_ton,
+            warning_count=len(compute_warnings(run.segments, run.samples)),
+        )
+        for run in runs.summarize_runs(db, include=is_core_flood, view=_VIEW, scope=scope, q=q,
+                                       type_contains=CORE_FLOOD_TYPE_CONTAINS)
+    ]
     return runs.sort_runs(items)
 
 
-# Writable Core Flood columns; kept as module names for existing importers.
-RESULT_FIELDS = CF_PROFILE.result_fields
-SCALAR_FIELDS = CF_PROFILE.scalar_fields
 _NOT_CF = "{experiment_id} is not a Core Flood experiment"
 
 

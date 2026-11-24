@@ -195,8 +195,8 @@ def test_get_experiment_results_with_flags(client, db_session):
     assert data[0]["grams_per_ton_yield"] == 55.0
 
 
-def test_next_ids_no_auth_required(client):
-    """next-ids must be accessible without authentication."""
+def test_next_ids_requires_auth(client):
+    """next-ids reveals experiment counts, so it needs a signed-in user."""
     from fastapi.testclient import TestClient
     from backend.api.main import app
     from backend.auth.firebase_auth import verify_firebase_token
@@ -208,7 +208,7 @@ def test_next_ids_no_auth_required(client):
     try:
         with TestClient(app) as c:
             r = c.get('/api/experiments/next-ids')
-            assert r.status_code == 200
+            assert r.status_code == 401
     finally:
         app.dependency_overrides.update(original)
 
@@ -221,6 +221,52 @@ def test_next_ids_includes_autoclave(client):
     assert 'Autoclave' in data
     assert isinstance(data['Autoclave'], int)
     assert data['Autoclave'] >= 1
+
+
+def _seed_ids(db_session, *experiment_ids: str) -> None:
+    from database.models.enums import ExperimentStatus
+    from database.models.experiments import Experiment
+
+    for offset, experiment_id in enumerate(experiment_ids):
+        db_session.add(Experiment(experiment_id=experiment_id, experiment_number=9190300 + offset,
+                                  status=ExperimentStatus.ONGOING))
+    db_session.commit()
+
+
+def test_next_id_and_next_ids_agree_on_autoclave(client, db_session):
+    """Issue #190 (D-03, sweep defect X-09): both endpoints use the AUTOCLAVE
+    prefix. next-ids used to search 'Autoclave_%', which matched nothing."""
+    _seed_ids(db_session, "AUTOCLAVE_004", "AUTOCLAVE_011")
+    assert client.get("/api/experiments/next-id?type=Autoclave").json()["next_id"] == "AUTOCLAVE_012"
+    assert client.get("/api/experiments/next-ids").json()["Autoclave"] == 12
+
+
+def test_next_ids_matches_next_id_for_every_type(client, db_session):
+    _seed_ids(db_session, "HPHT_041", "SERUM_007", "CF_019", "AUTOCLAVE_002")
+    numbers = client.get("/api/experiments/next-ids").json()
+    assert numbers == {"HPHT": 42, "Serum": 8, "CF": 20, "Autoclave": 3}
+    for label, experiment_type in (("HPHT", "HPHT"), ("Serum", "Serum"),
+                                   ("CF", "Core Flood"), ("Autoclave", "Autoclave")):
+        next_id = client.get(f"/api/experiments/next-id?type={experiment_type}").json()["next_id"]
+        assert int(next_id.rsplit("_", 1)[1]) == numbers[label]
+
+
+def test_next_id_counts_only_all_digit_suffixes(client, db_session):
+    """Segments, replicates, vials and side samples do not advance the number;
+    zero padding and long numbers do."""
+    _seed_ids(db_session, "HPHT_007", "HPHT_0012", "HPHT_099-2", "HPHT_150a",
+              "HPHT_200-t3", "HPHT_300_Desorption", "HPHT_JW_400")
+    assert client.get("/api/experiments/next-id?type=HPHT").json()["next_id"] == "HPHT_013"
+
+
+def test_next_id_pads_to_three_digits_and_grows_past_them(client, db_session):
+    _seed_ids(db_session, "SERUM_999")
+    assert client.get("/api/experiments/next-id?type=Serum").json()["next_id"] == "SERUM_1000"
+
+
+def test_next_id_unknown_type_uses_its_upper_cased_name(client, db_session):
+    _seed_ids(db_session, "OTHER_THING_004")
+    assert client.get("/api/experiments/next-id?type=Other Thing").json()["next_id"] == "OTHER_THING_005"
 
 
 # ============================================================
@@ -859,42 +905,88 @@ def test_patch_sample_id_calls_recalculate_on_conditions(client, db_session):
     assert ExperimentalConditions in called_types
 
 
-def test_patch_sample_id_calls_recalculate_on_scalars(client, db_session):
-    """recalculate is called with each ScalarResults instance."""
-    from unittest.mock import patch as mock_patch
+def _seed_scalars_for_sample_change(db_session, experiment_id, number, *, with_conditions, results=3):
     from database.models.conditions import ExperimentalConditions
     from database.models.results import ExperimentalResults, ScalarResults
 
-    _make_sample(db_session, "SAMPLE_SCALAR_001")
-    exp = _make_experiment(db_session, "SAMPLETEST_005", 9704)
-    cond = ExperimentalConditions(
-        experiment_fk=exp.id,
-        experiment_id=exp.experiment_id,
-    )
-    db_session.add(cond)
-    db_session.flush()
-    result = ExperimentalResults(
-        experiment_fk=exp.id,
-        time_post_reaction_days=1.0,
-        time_post_reaction_bucket_days=1.0,
-        cumulative_time_post_reaction_days=1.0,
-        is_primary_timepoint_result=True,
-    )
-    db_session.add(result)
-    db_session.flush()
-    scalar = ScalarResults(result_id=result.id)
-    db_session.add(scalar)
-    db_session.commit()
-
-    with mock_patch("backend.api.routers.experiments.recalculate") as mock_recalc:
-        resp = client.patch(
-            "/api/experiments/SAMPLETEST_005",
-            json={"sample_id": "SAMPLE_SCALAR_001"},
+    exp = _make_experiment(db_session, experiment_id, number)
+    if with_conditions:
+        db_session.add(ExperimentalConditions(
+            experiment_fk=exp.id, experiment_id=exp.experiment_id, rock_mass_g=2.0, water_volume_mL=20.0))
+        db_session.flush()
+    scalar_ids = []
+    for day in range(results):
+        result = ExperimentalResults(
+            experiment_fk=exp.id,
+            time_post_reaction_days=float(day),
+            time_post_reaction_bucket_days=float(day),
+            cumulative_time_post_reaction_days=float(day),
+            is_primary_timepoint_result=True,
         )
+        db_session.add(result)
+        db_session.flush()
+        scalar = ScalarResults(result_id=result.id, h2_concentration=100.0,
+                               gas_sampling_volume_ml=5.0, gas_sampling_pressure_MPa=0.1)
+        db_session.add(scalar)
+        db_session.flush()
+        scalar_ids.append(scalar.id)
+    db_session.commit()
+    return scalar_ids
+
+
+def _spy_on_scalar_recalculation(monkeypatch):
+    """Record every scalar recalculation, whether it arrives through the
+    conditions cascade (module attribute) or the registry (direct call)."""
+    from backend.services.calculations import registry, scalar_calcs
+    from database.models.results import ScalarResults
+
+    calls: list[int] = []
+    real = scalar_calcs.recalculate_scalar
+
+    def spy(instance, session):
+        calls.append(instance.id)
+        return real(instance, session)
+
+    monkeypatch.setattr(scalar_calcs, "recalculate_scalar", spy)
+    monkeypatch.setitem(registry._REGISTRY, ScalarResults, spy)
+    return calls
+
+
+def test_patch_sample_id_recalculates_each_scalar_exactly_once(client, db_session, monkeypatch):
+    """With a conditions row the cascade recalculates the scalars. The router
+    used to loop over them a second time (issue #191, E-08)."""
+    from database.models.results import ScalarResults
+
+    _make_sample(db_session, "SAMPLE_SCALAR_001")
+    scalar_ids = _seed_scalars_for_sample_change(db_session, "SAMPLETEST_005", 9704, with_conditions=True)
+    calls = _spy_on_scalar_recalculation(monkeypatch)
+
+    resp = client.patch("/api/experiments/SAMPLETEST_005", json={"sample_id": "SAMPLE_SCALAR_001"})
 
     assert resp.status_code == 200
-    called_types = [type(call_args[0][0]) for call_args in mock_recalc.call_args_list]
-    assert ScalarResults in called_types
+    assert sorted(calls) == sorted(scalar_ids)  # each one once, none twice
+    db_session.expire_all()
+    for scalar in db_session.query(ScalarResults).filter(ScalarResults.id.in_(scalar_ids)):
+        assert scalar.h2_micromoles is not None
+        assert scalar.h2_grams_per_ton_yield is not None  # needs rock_mass_g from conditions
+
+
+def test_patch_sample_id_without_conditions_still_recalculates_scalars(client, db_session, monkeypatch):
+    """No conditions row means no cascade, so the router recalculates directly."""
+    from database.models.results import ScalarResults
+
+    _make_sample(db_session, "SAMPLE_SCALAR_002")
+    scalar_ids = _seed_scalars_for_sample_change(db_session, "SAMPLETEST_015", 9714, with_conditions=False)
+    calls = _spy_on_scalar_recalculation(monkeypatch)
+
+    resp = client.patch("/api/experiments/SAMPLETEST_015", json={"sample_id": "SAMPLE_SCALAR_002"})
+
+    assert resp.status_code == 200
+    assert sorted(calls) == sorted(scalar_ids)
+    db_session.expire_all()
+    for scalar in db_session.query(ScalarResults).filter(ScalarResults.id.in_(scalar_ids)):
+        assert scalar.h2_micromoles is not None
+        assert scalar.h2_grams_per_ton_yield is None  # no rock mass to divide by
 
 
 def test_patch_sample_id_logs_modification(client, db_session):
@@ -1853,3 +1945,262 @@ def test_status_ongoing_in_p03_ignores_r03_but_409s_on_p03(client, db_session):
     detail = resp.json()["detail"]
     assert "Reactor P03" in detail and "HPHT_ST147_P03A" in detail
     assert "HPHT_ST147_R03" not in detail
+
+
+# ---------------------------------------------------------------------------
+# Issue #168 Part 3: last-result date filter and field; lab-local start date.
+# An experiment's last result date is MAX(scalar_results.measurement_date)
+# over its own results, as an America/New_York calendar date.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime as _dt  # noqa: E402
+
+from backend.services.workdays import LAB_TZ as _LAB_TZ  # noqa: E402
+from database.models.results import (  # noqa: E402
+    ExperimentalResults as _ER, ScalarResults as _SR,
+)
+
+_LR_NUM = iter(range(96000, 96500))
+
+
+def _lab_dt(y, m, d, hh=0, mm=0):
+    return _dt(y, m, d, hh, mm, tzinfo=_LAB_TZ)
+
+
+def _lr_exp(db, exp_id, *, started=None, measured=()):
+    """An experiment with one result per entry of `measured` (None = undated)."""
+    exp = Experiment(experiment_id=exp_id, experiment_number=next(_LR_NUM),
+                     status=ExperimentStatus.ONGOING, date=started)
+    db.add(exp)
+    db.flush()
+    for i, when in enumerate(measured, start=1):
+        res = _ER(experiment_fk=exp.id, time_post_reaction_days=float(i),
+                  is_primary_timepoint_result=True)
+        db.add(res)
+        db.flush()
+        db.add(_SR(result_id=res.id, final_ph=7.0, measurement_date=when))
+    db.flush()
+    return exp
+
+
+def _lr_seed(db):
+    # LRA: latest result 2026-10-20 (an earlier one on 10-01).
+    _lr_exp(db, "LR168_A", started=_lab_dt(2026, 7, 1, 9),
+            measured=[_lab_dt(2026, 10, 1, 10), _lab_dt(2026, 10, 20, 10)])
+    _lr_exp(db, "LR168_B", started=_lab_dt(2026, 9, 1, 9),
+            measured=[_lab_dt(2026, 9, 15, 10)])
+    _lr_exp(db, "LR168_C", started=_lab_dt(2026, 9, 1, 9), measured=[None, None])
+    _lr_exp(db, "LR168_D", started=_lab_dt(2026, 9, 1, 9))
+    db.commit()
+    db.expire_all()
+
+
+def _lr_ids(client, query):
+    resp = client.get(f"/api/experiments?search=LR168_&limit=500&{query}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    return sorted(i["experiment_id"] for i in body["items"]), body["total"]
+
+
+def test_last_result_range_uses_latest_result(client, db_session):
+    _lr_seed(db_session)
+    assert _lr_ids(client, "last_result_from=2026-10-10&last_result_to=2026-10-31") == (
+        ["LR168_A"], 1)
+    # LR168_A has a result on 10-01, but its LATEST is 10-20: out of range.
+    assert _lr_ids(client, "last_result_to=2026-10-05") == (["LR168_B"], 1)
+    assert _lr_ids(client, "last_result_from=2026-09-15") == (
+        ["LR168_A", "LR168_B"], 2)
+
+
+def test_last_result_to_is_inclusive_in_lab_time(client, db_session):
+    _lr_exp(db_session, "LR168_PM", measured=[_lab_dt(2026, 11, 10, 14)])
+    # 23:30 ET on 11-10 is already 11-11 in UTC.
+    _lr_exp(db_session, "LR168_LATE", measured=[_lab_dt(2026, 11, 10, 23, 30)])
+    _lr_exp(db_session, "LR168_NEXT", measured=[_lab_dt(2026, 11, 11, 0, 30)])
+    db_session.commit()
+    db_session.expire_all()
+    assert _lr_ids(client, "last_result_to=2026-11-10") == (
+        ["LR168_LATE", "LR168_PM"], 2)
+    assert _lr_ids(client, "last_result_from=2026-11-11") == (["LR168_NEXT"], 1)
+
+
+def test_undated_results_excluded_only_when_a_bound_is_set(client, db_session):
+    _lr_seed(db_session)
+    ids, _ = _lr_ids(client, "")
+    assert "LR168_C" in ids and "LR168_D" in ids
+    for q in ("last_result_from=2000-01-01", "last_result_to=2100-01-01"):
+        ids, _ = _lr_ids(client, q)
+        assert "LR168_C" not in ids and "LR168_D" not in ids
+
+
+def test_last_result_filter_total_in_grouped_mode(client, db_session):
+    _lr_seed(db_session)
+    resp = client.get("/api/experiments?search=LR168_&group_replicates=true"
+                      "&last_result_from=2026-10-10")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert [i["experiment_id"] for i in body["items"]] == ["LR168_A"]
+
+
+def test_list_item_last_result_date(client, db_session):
+    _lr_seed(db_session)
+    _lr_exp(db_session, "LR168_TZ", measured=[_lab_dt(2026, 11, 10, 23, 30)])
+    db_session.commit()
+    db_session.expire_all()
+    for grouped in ("false", "true"):
+        resp = client.get(f"/api/experiments?search=LR168_&group_replicates={grouped}")
+        got = {i["experiment_id"]: i["last_result_date"] for i in resp.json()["items"]}
+        assert got == {"LR168_A": "2026-10-20", "LR168_B": "2026-09-15",
+                       "LR168_C": None, "LR168_D": None,
+                       "LR168_TZ": "2026-11-10"}, grouped
+
+
+def test_vial_row_shows_latest_matching_vial(client, db_session):
+    # One flat row for three vials; each vial has its own last result.
+    for day, when in ((1, _lab_dt(2026, 10, 1, 10)), (3, _lab_dt(2026, 10, 5, 10)),
+                      (7, _lab_dt(2026, 10, 9, 10))):
+        exp = Experiment(experiment_id=f"LR168_V_001a-t{day}",
+                         experiment_number=next(_LR_NUM),
+                         status=ExperimentStatus.COMPLETED)
+        db_session.add(exp)
+        db_session.flush()
+        res = _ER(experiment_fk=exp.id, time_post_reaction_days=float(day),
+                  is_primary_timepoint_result=True)
+        db_session.add(res)
+        db_session.flush()
+        db_session.add(_SR(result_id=res.id, final_ph=7.0, measurement_date=when))
+    db_session.commit()
+    db_session.expire_all()
+
+    def row(query=""):
+        resp = client.get(f"/api/experiments?search=LR168_V_&{query}")
+        items = resp.json()["items"]
+        assert len(items) == 1
+        return items[0]
+
+    assert (row()["last_result_date"], row()["vial_count"]) == ("2026-10-09", 3)
+    # Filtered: only the vials that pass count, as vial_count already does.
+    filtered = row("last_result_to=2026-10-06")
+    assert (filtered["last_result_date"], filtered["vial_count"]) == ("2026-10-05", 2)
+
+
+def test_start_date_bounds_are_lab_calendar_dates(client, db_session):
+    _lr_exp(db_session, "LR168_S_AM", started=_lab_dt(2026, 10, 10, 9))
+    # 22:00 ET on 10-10 is 10-11 in UTC.
+    _lr_exp(db_session, "LR168_S_PM", started=_lab_dt(2026, 10, 10, 22))
+    _lr_exp(db_session, "LR168_S_NEXT", started=_lab_dt(2026, 10, 11, 9))
+    db_session.commit()
+    db_session.expire_all()
+    assert _lr_ids(client, "date_to=2026-10-10") == (["LR168_S_AM", "LR168_S_PM"], 2)
+    assert _lr_ids(client, "date_from=2026-10-11") == (["LR168_S_NEXT"], 1)
+    assert _lr_ids(client, "date_from=2026-10-10&date_to=2026-10-10") == (
+        ["LR168_S_AM", "LR168_S_PM"], 2)
+
+
+def test_last_result_combined_with_start_date(client, db_session):
+    _lr_seed(db_session)
+    # Started in September and last sampled from October on: nothing (A began in July).
+    assert _lr_ids(client, "date_from=2026-08-01&last_result_from=2026-10-01") == ([], 0)
+    assert _lr_ids(client, "date_to=2026-07-31&last_result_from=2026-10-01") == (
+        ["LR168_A"], 1)
+    assert _lr_ids(client, "date_from=2026-08-01&last_result_to=2026-09-30") == (
+        ["LR168_B"], 1)
+
+
+@pytest.mark.parametrize("param", ["date_from", "date_to", "last_result_from",
+                                   "last_result_to"])
+def test_date_params_are_validated(client, param):
+    resp = client.get(f"/api/experiments?{param}=not-a-date")
+    assert resp.status_code == 422
+
+
+def test_grouped_row_shows_latest_across_its_members(client, db_session):
+    """#168: as for flat vial rows, a group row stands for its whole group
+    (unfiltered, like its vial_count) and each letter child for its vials."""
+    for exp_id, day, when in (("LR168_G_001a-t1", 1, _lab_dt(2026, 10, 1, 10)),
+                              ("LR168_G_001a-t3", 3, _lab_dt(2026, 10, 5, 10)),
+                              ("LR168_G_001b", 1, _lab_dt(2026, 10, 9, 10)),
+                              ("LR168_G_001c", 1, None)):
+        exp = Experiment(experiment_id=exp_id, experiment_number=next(_LR_NUM),
+                         status=ExperimentStatus.COMPLETED)
+        db_session.add(exp)
+        db_session.flush()
+        res = _ER(experiment_fk=exp.id, time_post_reaction_days=float(day),
+                  is_primary_timepoint_result=True)
+        db_session.add(res)
+        db_session.flush()
+        db_session.add(_SR(result_id=res.id, final_ph=7.0, measurement_date=when))
+    db_session.commit()
+    db_session.expire_all()
+
+    resp = client.get("/api/experiments?search=LR168_G_&group_replicates=true")
+    items = resp.json()["items"]
+    assert len(items) == 1
+    group = items[0]
+    assert group["group_display_id"] == "LR168_G_001"
+    assert group["last_result_date"] == "2026-10-09"
+    children = {c["group_display_id"]: c["last_result_date"] for c in group["replicates"]}
+    assert children == {"LR168_G_001a": "2026-10-05", "LR168_G_001b": "2026-10-09",
+                        "LR168_G_001c": None}
+
+
+# --- Reactor label on the list, and the `reactor` filter (2026-11-16) --------
+
+_RXL = {"RXL_R": "R03", "RXL_P": "P03", "RXL_CF": "CF03", "RXL_AUTO": None}
+
+
+def _seed_reactor_list(db):
+    rows = [("RXL_R", "HPHT", 3, None), ("RXL_P", "HPHT", 3, "P"),
+            ("RXL_CF", "Core Flood", 3, None), ("RXL_AUTO", "Autoclave", 3, None),
+            ("RXL_OTHER", "HPHT", 7, None)]
+    for i, (eid, etype, number, series) in enumerate(rows):
+        exp = _make_experiment(db, eid, 96500 + i)
+        db.add(_EC(experiment_fk=exp.id, experiment_id=eid, experiment_type=etype,
+                   reactor_number=number, reactor_series=series))
+    db.commit()
+
+
+def _list_ids(client, query):
+    resp = client.get(f"/api/experiments?search=RXL_&{query}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    ids = {item["experiment_id"] for item in body["items"]}
+    assert body["total"] == len(ids)
+    return ids
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("P3", {"RXL_P"}), ("r03", {"RXL_R"}), ("CF3", {"RXL_CF"}),
+    ("3", {"RXL_R", "RXL_P", "RXL_CF", "RXL_AUTO"}),
+    ("%20P03%20", {"RXL_P"}),
+    ("P9", set()),
+])
+def test_list_reactor_filter(client, db_session, value, expected):
+    _seed_reactor_list(db_session)
+    assert _list_ids(client, f"reactor={value}") == expected
+
+
+def test_list_reactor_number_filter_is_unchanged(client, db_session):
+    _seed_reactor_list(db_session)
+    assert _list_ids(client, "reactor_number=3") == {
+        "RXL_R", "RXL_P", "RXL_CF", "RXL_AUTO"}
+
+
+def test_list_blank_reactor_filter_is_no_filter(client, db_session):
+    _seed_reactor_list(db_session)
+    assert len(_list_ids(client, "reactor=%20")) == 5
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "R0", "3.5", "P"])
+def test_list_unknown_reactor_is_422(client, db_session, value):
+    resp = client.get(f"/api/experiments?reactor={value}")
+    assert resp.status_code == 422
+    assert f"Unknown reactor '{value}'" in resp.json()["detail"]
+
+
+def test_list_items_carry_reactor_slot(client, db_session):
+    _seed_reactor_list(db_session)
+    resp = client.get("/api/experiments?search=RXL_&reactor_number=3")
+    slots = {i["experiment_id"]: i["reactor_slot"] for i in resp.json()["items"]}
+    assert slots == _RXL

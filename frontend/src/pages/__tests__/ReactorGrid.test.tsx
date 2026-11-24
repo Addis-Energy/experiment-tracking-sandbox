@@ -1,7 +1,7 @@
 import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ToastProvider } from '@/components/ui'
 import type { ReactorCardData } from '@/api/dashboard'
@@ -14,7 +14,7 @@ vi.mock('@/api/experiments', () => ({
   },
 }))
 
-import { ReactorGrid, runPagePath } from '../ReactorGrid'
+import { ReactorGrid } from '../ReactorGrid'
 import { experimentsApi } from '@/api/experiments'
 
 function makeCard(overrides: Partial<ReactorCardData> = {}): ReactorCardData {
@@ -37,6 +37,8 @@ function makeCard(overrides: Partial<ReactorCardData> = {}): ReactorCardData {
     vendor: null,
     todays_modification: null,
     latest_modification: null,
+    last_sampled_date: null,
+    cumulative_h2_grams_per_ton: null,
     ...overrides,
   }
 }
@@ -84,7 +86,7 @@ describe('ReactorCard — todays_modification (issue #72)', () => {
 describe('ReactorGrid — slot counts derived from props (issue #85)', () => {
   it('renders 19 slots (16 R + 3 CF) and includes CF03', () => {
     const { container } = renderGrid([])
-    const labels = Array.from(container.querySelectorAll('p.font-mono-data.text-xl')).map(
+    const labels = Array.from(container.querySelectorAll('[data-testid="reactor-slot-label"]')).map(
       (el) => el.textContent
     )
     expect(labels.length).toBe(19)
@@ -94,7 +96,7 @@ describe('ReactorGrid — slot counts derived from props (issue #85)', () => {
 
   it('renders a different total when rSlotCount/cfSlotCount props change', () => {
     const { container } = renderGrid([], 2, 1)
-    const labels = Array.from(container.querySelectorAll('p.font-mono-data.text-xl')).map(
+    const labels = Array.from(container.querySelectorAll('[data-testid="reactor-slot-label"]')).map(
       (el) => el.textContent
     )
     expect(labels.length).toBe(3)
@@ -255,7 +257,7 @@ describe('ReactorGrid — Parr group (issue #147)', () => {
     )
   }
   const labelsIn = (el: HTMLElement) =>
-    Array.from(el.querySelectorAll('p.font-mono-data.text-xl')).map((n) => n.textContent)
+    Array.from(el.querySelectorAll('[data-testid="reactor-slot-label"]')).map((n) => n.textContent)
 
   it('renders six Parr slots in their own group between HPHT and Core Flood', () => {
     const { container } = renderWithParr([])
@@ -288,23 +290,175 @@ describe('ReactorGrid — Parr group (issue #147)', () => {
   })
 })
 
-describe('runPagePath — HPHT run page link (issue #150)', () => {
-  it('links an ONGOING R or P card to its base ID, not its own segment ID', () => {
-    expect(runPagePath(makeCard({ experiment_id: 'HPHT_297-2', base_experiment_id: 'HPHT_297' })))
-      .toBe('/hpht/HPHT_297')
-    expect(runPagePath(makeCard({ reactor_label: 'P03', base_experiment_id: 'HPHT_310' })))
-      .toBe('/hpht/HPHT_310')
+function LocationProbe() {
+  const { pathname, search } = useLocation()
+  return <p data-testid="probe">{pathname + search}</p>
+}
+
+describe('reactor detail modal — leads to the run (issue #157)', () => {
+  const openModal = async (card: ReactorCardData) => {
+    renderGrid([card])
+    fireEvent.click(screen.getByText(card.experiment_id!))
+    return screen.findByRole('dialog', { name: `${card.reactor_label} ${card.experiment_id}` })
+  }
+  const primaries = (dialog: HTMLElement) =>
+    Array.from(dialog.querySelectorAll('button')).filter((b) => b.className.includes('bg-red-500'))
+
+  it('an occupied HPHT card offers one way in', async () => {
+    const dialog = await openModal(makeCard({ experiment_id: 'HPHT_297-2', base_experiment_id: 'HPHT_297' }))
+    const open = within(dialog).getByRole('button', { name: 'Open HPHT_297-2' })
+    expect(within(dialog).queryByRole('button', { name: /open run page|open segment/i })).toBeNull()
+    expect(within(dialog).queryByRole('button', { name: /view detail/i })).toBeNull()
+    expect(primaries(dialog)).toEqual([open])
+
+    // Footer order: Close, then the single way in.
+    expect(Array.from(open.parentElement!.querySelectorAll('button')).map((b) => b.textContent)).toEqual([
+      'Close', 'Open HPHT_297-2',
+    ])
   })
 
-  it('gives no link for Core Flood rigs, QUEUED cards or a missing base ID', () => {
-    expect(runPagePath(makeCard({ reactor_label: 'CF01', experiment_type: 'Core Flood' }))).toBeNull()
-    expect(runPagePath(makeCard({ status: 'QUEUED' }))).toBeNull()
-    expect(runPagePath(makeCard({ base_experiment_id: null }))).toBeNull()
+  it('opens the run with the segment selected', async () => {
+    const card = makeCard({ experiment_id: 'HPHT_297-2', base_experiment_id: 'HPHT_297' })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <Routes>
+              <Route path="/" element={<ReactorGrid cards={[card]} rSlotCount={16} cfSlotCount={3} />} />
+              <Route path="/hpht/:baseId" element={<LocationProbe />} />
+            </Routes>
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByText('HPHT_297-2'))
+    const dialog = await screen.findByRole('dialog', { name: 'R05 HPHT_297-2' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Open HPHT_297-2' }))
+    expect(await screen.findByTestId('probe')).toHaveTextContent('/hpht/HPHT_297?segment=HPHT_297-2')
   })
 
-  it('shows Open run page in the card detail modal', async () => {
-    renderGrid([makeCard({ base_experiment_id: 'HPHT_MH_072' })])
-    fireEvent.click(screen.getByText('HPHT_MH_072'))
-    expect(await screen.findByRole('button', { name: 'Open run page' })).toBeInTheDocument()
+  it('offers the Core Flood run for a CF card and navigates to it', async () => {
+    const card = makeCard({
+      reactor_label: 'CF01', reactor_number: 1, experiment_type: 'Core Flood',
+      experiment_id: 'CF_018-3', base_experiment_id: 'CF_018',
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <Routes>
+              <Route path="/" element={<ReactorGrid cards={[card]} rSlotCount={16} cfSlotCount={3} />} />
+              <Route path="/core-floods/:baseId" element={<p>core flood run page</p>} />
+            </Routes>
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByText('CF_018-3'))
+    const dialog = await screen.findByRole('dialog', { name: 'CF01 CF_018-3' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Open CF_018-3' }))
+    expect(await screen.findByText('core flood run page')).toBeInTheDocument()
+  })
+
+  it('goes to the experiment page when the card has no run', async () => {
+    const dialog = await openModal(makeCard({ base_experiment_id: null }))
+    expect(primaries(dialog)).toEqual([within(dialog).getByRole('button', { name: 'Open HPHT_MH_072' })])
+  })
+
+  it('puts the run actions above the modification note, whose Save is never primary', async () => {
+    const dialog = await openModal(makeCard())
+    const run = within(dialog).getByRole('button', { name: 'Open HPHT_MH_072' })
+    const heading = within(dialog).getByText('Log a reactor modification note')
+    // The footer precedes the note section in document order.
+    expect(run.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    const save = within(dialog).getByRole('button', { name: 'Save' })
+    expect(save).not.toHaveClass('bg-red-500')
+    expect(save).toBeDisabled()
+    fireEvent.change(within(dialog).getByPlaceholderText('Enter a reactor modification…'), {
+      target: { value: 'Swapped stir shaft' },
+    })
+    expect(save).toBeEnabled()
+    expect(save).not.toHaveClass('bg-red-500')
+    expect(primaries(dialog)).toEqual([run])
+  })
+})
+
+describe('ReactorCard — experiment-first layout (issue #165)', () => {
+  const header = (container: HTMLElement, label: string) => {
+    const slot = Array.from(container.querySelectorAll('[data-testid="reactor-slot-label"]'))
+      .find((el) => el.textContent?.trim() === label)!
+    return slot.closest('[data-testid="reactor-card-header"]') as HTMLElement
+  }
+  const cardOf = (container: HTMLElement, label: string) => header(container, label).parentElement as HTMLElement
+
+  it('puts slot label, experiment ID and status on one header row, ID largest', () => {
+    const { container } = renderGrid([makeCard()])
+    const h = header(container, 'R05')
+    const [slot, id] = Array.from(h.children) as HTMLElement[]
+    expect(slot).toHaveTextContent('R05')
+    expect(slot).toHaveClass('text-sm', 'text-ink-muted')
+    expect(id).toHaveTextContent('HPHT_MH_072')
+    expect(id).toHaveClass('text-lg', 'font-bold', 'truncate')
+    expect(id).toHaveAttribute('title', 'HPHT_MH_072')
+    expect(within(h).getByTitle('Change status')).toBeInTheDocument()
+  })
+
+  it('no longer shows the Sample line on the card', () => {
+    const { container } = renderGrid([makeCard({ sample_id: 'ROCK-7' })])
+    expect(cardOf(container, 'R05')).not.toHaveTextContent('Sample:')
+    expect(screen.queryByText('ROCK-7')).toBeNull()
+  })
+
+  it('shows the last sampled date as a calendar date', () => {
+    const { container } = renderGrid([makeCard({ last_sampled_date: '2026-11-06' })])
+    expect(within(cardOf(container, 'R05')).getByTestId('reactor-card-last-sampled'))
+      .toHaveTextContent('Last sampled: Nov 6, 2026')
+  })
+
+  it('shows run H2 to date in g/t, formatted like the run tables', () => {
+    const { container } = renderGrid([makeCard({ cumulative_h2_grams_per_ton: 1.234567 })])
+    const metrics = within(cardOf(container, 'R05')).getByTestId('reactor-card-metrics')
+    expect(metrics).toHaveTextContent('200 °C')
+    expect(metrics).toHaveTextContent('Day 3')
+    expect(metrics).toHaveTextContent('H₂ 1.2 g/t')
+  })
+
+  it('shows placeholders when values are missing', () => {
+    const { container } = renderGrid([makeCard({ temperature_c: null, days_running: null })])
+    const card = within(cardOf(container, 'R05'))
+    expect(card.getByTestId('reactor-card-last-sampled')).toHaveTextContent('Last sampled: —')
+    const metrics = card.getByTestId('reactor-card-metrics')
+    expect(metrics).toHaveTextContent('— °C')
+    expect(metrics).toHaveTextContent('Day —')
+    expect(metrics).toHaveTextContent('H₂ — g/t')
+  })
+
+  it('gives empty slots the same rows, with placeholders', () => {
+    const { container } = renderGrid([])
+    const card = cardOf(container, 'R01')
+    expect(card).toHaveTextContent('No experiment assigned')
+    expect(card).toHaveTextContent('Empty')
+    expect(within(card).getByTestId('reactor-card-last-sampled')).toHaveTextContent('Last sampled: —')
+    expect(within(card).getByTestId('reactor-card-metrics')).toHaveTextContent('H₂ — g/t')
+  })
+
+  it('lays the groups out R 4 wide, P 3 wide and CF 3 wide', () => {
+    const queryClient = new QueryClient()
+    const { container } = render(
+      <MemoryRouter>
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <ReactorGrid cards={[]} rSlotCount={16} pSlotCount={6} cfSlotCount={3} />
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    )
+    const grid = (k: string) => container.querySelector(`[data-testid="reactor-grid-${k}"]`)!
+    expect(grid('R')).toHaveClass('grid-cols-1', 'sm:grid-cols-2', 'lg:grid-cols-4')
+    expect(grid('P')).toHaveClass('grid-cols-1', 'sm:grid-cols-2', 'lg:grid-cols-3')
+    expect(grid('CF')).toHaveClass('grid-cols-1', 'sm:grid-cols-3')
   })
 })

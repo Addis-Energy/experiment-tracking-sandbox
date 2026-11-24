@@ -1,16 +1,15 @@
 # backend/api/routers/samples.py
 from __future__ import annotations
-import os
-import uuid
 import structlog
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, File, Form, UploadFile
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session, selectinload
 from database.models.samples import SampleInfo, SamplePhotos
-from database.models.analysis import ExternalAnalysis
+from database.models.analysis import ExternalAnalysis, PXRFReading
 from database.models.experiments import Experiment
 from backend.api.dependencies.db import get_db
+from backend.api.schemas.experiments import ModificationResponse
 from backend.auth.firebase_auth import verify_firebase_token, FirebaseUser
 from backend.api.schemas.samples import (
     SampleCreate, SampleUpdate, SampleResponse,
@@ -22,6 +21,7 @@ from backend.api.schemas.samples import (
 )
 from backend.services.samples import evaluate_characterized, log_sample_modification, normalize_pxrf_reading_no
 from backend.config.settings import get_settings
+from backend.services.photo_storage import get_photo_store
 
 PHOTO_ALLOWED_TYPES = {"image/jpeg", "image/png"}
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB
@@ -161,10 +161,7 @@ def get_sample(
     db: Session = Depends(get_db),
     current_user: FirebaseUser = Depends(verify_firebase_token),
 ) -> SampleDetail:
-    from database.models.conditions import ExperimentalConditions
     from database.models.characterization import ElementalAnalysis
-    from database.models.analysis import PXRFReading
-    from database.models.xrd import XRDAnalysis
 
     sample = db.execute(
         select(SampleInfo)
@@ -245,7 +242,6 @@ def _build_pxrf_map(
     db: Session,
 ) -> "dict[str, PXRFReading]":
     """Return a {reading_no: PXRFReading} map for all pXRF analyses in the list."""
-    from database.models.analysis import PXRFReading
     reading_nos: set[str] = set()
     for a in analyses:
         if a.analysis_type == "pXRF" and a.pxrf_reading_no:
@@ -423,18 +419,13 @@ async def upload_photo(
     if len(content) > MAX_FILE_BYTES:
         raise HTTPException(status_code=422, detail="File exceeds 20 MB limit")
 
-    settings = get_settings()
-    dest_dir = Path(settings.sample_photos_dir) / sample_id
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    stem = Path(file.filename or "photo").stem
-    ext = Path(file.filename or "photo").suffix or ".jpg"
-    filename = f"{stem}_{uuid.uuid4().hex[:8]}{ext}"
-    dest = dest_dir / filename
-    dest.write_bytes(content)
+    ref = get_photo_store(get_settings()).save(
+        sample_id, file.filename, content, file.content_type
+    )
 
     photo = SamplePhotos(
         sample_id=sample_id,
-        file_path=str(dest),
+        file_path=ref,
         file_name=file.filename,
         file_type=file.content_type,
         description=description,
@@ -465,9 +456,7 @@ def delete_photo(
     if photo is None:
         raise HTTPException(status_code=404, detail="Photo not found")
 
-    file_path = Path(photo.file_path)
-    if file_path.exists():
-        file_path.unlink()
+    get_photo_store(get_settings()).delete(photo.file_path)
 
     log_sample_modification(
         db, sample_id=sample_id, modified_by=current_user.email,
@@ -486,8 +475,6 @@ def create_analysis(
     db: Session = Depends(get_db),
     current_user: FirebaseUser = Depends(verify_firebase_token),
 ) -> ExternalAnalysisWithWarnings:
-    from database.models.analysis import ExternalAnalysis as EA, PXRFReading
-    from sqlalchemy.orm import selectinload as sl
 
     if db.get(SampleInfo, sample_id) is None:
         raise HTTPException(status_code=404, detail="Sample not found")
@@ -510,16 +497,9 @@ def create_analysis(
     if normalized_readings:
         ea_data["pxrf_reading_no"] = ",".join(normalized_readings)
 
-    ea = EA(sample_id=sample_id, **ea_data)
+    ea = ExternalAnalysis(sample_id=sample_id, **ea_data)
     db.add(ea)
     db.flush()
-
-    # Reload with files relationship to satisfy _to_analysis_response
-    db.execute(
-        select(EA)
-        .where(EA.id == ea.id)
-        .options(sl(EA.analysis_files))
-    ).scalar_one()
 
     sample = db.get(SampleInfo, sample_id)
     sample.characterized = evaluate_characterized(db, sample_id)
@@ -544,14 +524,12 @@ def list_analyses(
     db: Session = Depends(get_db),
     current_user: FirebaseUser = Depends(verify_firebase_token),
 ) -> list[ExternalAnalysisResponse]:
-    from database.models.analysis import ExternalAnalysis as EA
-    from sqlalchemy.orm import selectinload as sl
 
     rows = db.execute(
-        select(EA)
-        .where(EA.sample_id == sample_id)
-        .options(sl(EA.analysis_files), sl(EA.xrd_analysis))
-        .order_by(EA.analysis_date)
+        select(ExternalAnalysis)
+        .where(ExternalAnalysis.sample_id == sample_id)
+        .options(selectinload(ExternalAnalysis.analysis_files), selectinload(ExternalAnalysis.xrd_analysis))
+        .order_by(ExternalAnalysis.analysis_date)
     ).scalars().all()
     pxrf_map = _build_pxrf_map(list(rows), db)
     return [_to_analysis_response(r, pxrf_map) for r in rows]
@@ -565,16 +543,14 @@ def delete_analysis(
     db: Session = Depends(get_db),
     current_user: FirebaseUser = Depends(verify_firebase_token),
 ):
-    from database.models.analysis import ExternalAnalysis as EA
-    from sqlalchemy.orm import selectinload as sl
 
     ea = db.execute(
-        select(EA)
+        select(ExternalAnalysis)
         .where(
-            EA.id == analysis_id,
-            EA.sample_id == sample_id,
+            ExternalAnalysis.id == analysis_id,
+            ExternalAnalysis.sample_id == sample_id,
         )
-        .options(sl(EA.analysis_files))
+        .options(selectinload(ExternalAnalysis.analysis_files))
     ).scalar_one_or_none()
     if ea is None:
         raise HTTPException(status_code=404, detail="Analysis not found")
@@ -599,7 +575,7 @@ def delete_analysis(
 
 
 # ── GET /api/samples/{sample_id}/activity ─────────────────────────────────
-@router.get("/{sample_id}/activity")
+@router.get("/{sample_id}/activity", response_model=list[ModificationResponse])
 def get_sample_activity(
     sample_id: str,
     db: Session = Depends(get_db),
@@ -613,15 +589,4 @@ def get_sample_activity(
         .order_by(ModificationsLog.created_at.desc())
         .limit(100)
     ).scalars().all()
-    return [
-        {
-            "id": r.id,
-            "modified_by": r.modified_by,
-            "modification_type": r.modification_type,
-            "modified_table": r.modified_table,
-            "old_values": r.old_values,
-            "new_values": r.new_values,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-        }
-        for r in rows
-    ]
+    return [ModificationResponse.model_validate(r) for r in rows]

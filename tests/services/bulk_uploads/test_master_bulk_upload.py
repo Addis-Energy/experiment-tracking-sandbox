@@ -3395,3 +3395,203 @@ def test_tube_is_not_declared_as_a_scalar_sheet_field(db_session: Session, monke
     assert len(seen) == 1
     assert "sample_tube_number" not in seen[0]
     assert "sample_tube_number" not in seen[0]["_sheet_fields"]
+
+
+# ---------------------------------------------------------------------------
+# Reactor column: check only (reactor-labels, 2026-11-16)
+# ---------------------------------------------------------------------------
+
+from database.models.conditions import ExperimentalConditions  # noqa: E402
+
+
+def _seed_parr(db: Session, experiment_id: str, exp_num: int) -> ExperimentalConditions:
+    """An HPHT experiment in Parr vessel 3 (reactor_slot 'P03')."""
+    exp = _seed_experiment(db, experiment_id, exp_num)
+    cond = ExperimentalConditions(
+        experiment_fk=exp.id, experiment_id=exp.experiment_id,
+        experiment_type="HPHT", reactor_number=3, reactor_series="P",
+    )
+    db.add(cond)
+    db.flush()
+    assert cond.reactor_slot == "P03"
+    return cond
+
+
+def _reactor_excel(rows: list[tuple[list, object]], header: str = "Reactor") -> bytes:
+    """A v3 Dashboard with a reactor column; each item is (v3 row, reactor cell)."""
+    return make_excel_multisheet({"Dashboard": (
+        list(_V3_HEADERS) + [header], [row + [cell] for row, cell in rows],
+    )})
+
+
+def _reactor_warnings(result) -> list[str]:
+    return [w for w in result.warnings if w.startswith("'Reactor'")]
+
+
+def _assert_parr_untouched(db: Session, cond: ExperimentalConditions) -> None:
+    db.flush()
+    db.refresh(cond)
+    assert (cond.reactor_number, cond.reactor_series, cond.reactor_slot) == (3, "P", "P03")
+
+
+@pytest.mark.parametrize("cell", ["P03", "p3", " P3 "])
+def test_reactor_cell_matching_label_is_silent(db_session: Session, cell):
+    cond = _seed_parr(db_session, "RXM_001", 97001)
+    result = MasterBulkUploadService.from_bytes_ex(
+        db_session, _reactor_excel([(_v3_row("RXM_001"), cell)]))
+    assert result.created == 1
+    assert _reactor_warnings(result) == []
+    _assert_parr_untouched(db_session, cond)
+
+
+def test_reactor_cell_label_mismatch_warns(db_session: Session):
+    cond = _seed_parr(db_session, "RXM_002", 97002)
+    result = MasterBulkUploadService.from_bytes_ex(
+        db_session, _reactor_excel([(_v3_row("RXM_002"), "R03")]))
+    assert result.created == 1
+    (warning,) = _reactor_warnings(result)
+    assert "does not match" in warning
+    assert "2 (RXM_002): sheet R03, app P03" in warning
+    _assert_parr_untouched(db_session, cond)
+
+
+def test_reactor_cell_bare_number_compares_number_only(db_session: Session):
+    cond = _seed_parr(db_session, "RXM_003", 97003)
+    result = MasterBulkUploadService.from_bytes_ex(db_session, _reactor_excel([
+        (_v3_row("RXM_003", 1.0), 3),
+        (_v3_row("RXM_003", 2.0), 4),
+    ]))
+    assert result.created == 2
+    (warning,) = _reactor_warnings(result)
+    assert "1 row(s)" in warning
+    assert "3 (RXM_003): sheet 4, app P03" in warning
+    _assert_parr_untouched(db_session, cond)
+
+
+def test_reactor_cell_on_experiment_without_reactor_warns(db_session: Session):
+    _seed_experiment(db_session, "RXM_004", 97004)      # no conditions row at all
+    exp = _seed_experiment(db_session, "RXM_005", 97005)
+    db_session.add(ExperimentalConditions(
+        experiment_fk=exp.id, experiment_id=exp.experiment_id, experiment_type="Serum"))
+    db_session.flush()
+    result = MasterBulkUploadService.from_bytes_ex(db_session, _reactor_excel([
+        (_v3_row("RXM_004"), "R03"),
+        (_v3_row("RXM_005"), "R03"),
+    ]))
+    assert result.created == 2
+    (warning,) = _reactor_warnings(result)
+    assert "2 (RXM_004): sheet R03, app none" in warning
+    assert "3 (RXM_005): sheet R03, app none" in warning
+
+
+def test_reactor_cell_unreadable_warns_and_uploads(db_session: Session):
+    cond = _seed_parr(db_session, "RXM_006", 97006)
+    result = MasterBulkUploadService.from_bytes_ex(db_session, _reactor_excel([
+        (_v3_row("RXM_006", 1.0), "Parr 3"),
+        (_v3_row("RXM_006", 2.0), 7.5),
+        (_v3_row("RXM_006", 3.0), -1),
+    ]))
+    assert result.created == 3
+    (warning,) = _reactor_warnings(result)
+    assert "could not be read on 3 row(s) (2, 3, 4)" in warning
+    _assert_parr_untouched(db_session, cond)
+
+
+@pytest.mark.parametrize("cell", [None, "   ", 0])
+def test_reactor_cell_blank_is_silent(db_session: Session, cell):
+    """0 is blank: the Dashboard's XLOOKUP returns 0 for an empty source cell."""
+    _seed_parr(db_session, "RXM_007", 97007)
+    result = MasterBulkUploadService.from_bytes_ex(
+        db_session, _reactor_excel([(_v3_row("RXM_007"), cell)]))
+    assert result.created == 1
+    assert _reactor_warnings(result) == []
+
+
+def test_sheet_without_reactor_column_is_silent(db_session: Session):
+    _seed_parr(db_session, "RXM_008", 97008)
+    result = MasterBulkUploadService.from_bytes_ex(
+        db_session, _master_excel_v3([_v3_row("RXM_008")]))
+    assert result.created == 1
+    assert _reactor_warnings(result) == []
+
+
+@pytest.mark.parametrize("header", ["Reactor Number", "reactor #", "REACTOR"])
+def test_reactor_header_aliases(db_session: Session, header):
+    _seed_parr(db_session, "RXM_009", 97009)
+    result = MasterBulkUploadService.from_bytes_ex(
+        db_session, _reactor_excel([(_v3_row("RXM_009"), "R03")], header=header))
+    (warning,) = _reactor_warnings(result)
+    assert "sheet R03, app P03" in warning
+
+
+def test_reactor_cell_checked_per_row_in_a_merged_vial_day(db_session: Session):
+    """The gas row and the liquid row of one vial-day each keep their own cell."""
+    cond = _seed_parr(db_session, "RXM_010", 97010)
+    result = MasterBulkUploadService.from_bytes_ex(db_session, _reactor_excel([
+        (_v3_row("RXM_010", 7.0, ph=None, fl_h2=100.0, fl_vol=5.0, fl_psi=14.7), "P03"),
+        (_v3_row("RXM_010", 7.0, ph=8.1), "R03"),
+    ]))
+    assert result.errors == []
+    assert result.created == 1
+    (warning,) = _reactor_warnings(result)
+    assert "1 row(s)" in warning
+    assert "3 (RXM_010): sheet R03, app P03" in warning
+    _assert_parr_untouched(db_session, cond)
+
+
+def test_reactor_cell_never_adds_an_error(db_session: Session):
+    _seed_parr(db_session, "RXM_011", 97011)
+    result = MasterBulkUploadService.from_bytes_ex(db_session, _reactor_excel([
+        (_v3_row("RXM_011", 1.0), "R03"),
+        (_v3_row("RXM_011", 2.0), "nonsense"),
+    ]))
+    assert result.errors == []
+    assert result.created == 2
+
+
+def test_reactor_cell_on_a_rejected_row_is_not_checked(db_session: Session):
+    """Nothing was written for an unknown experiment, and its error names it."""
+    result = MasterBulkUploadService.from_bytes_ex(
+        db_session, _reactor_excel([(_v3_row("RXM_NOPE_999"), "R03")]))
+    assert result.created == 0
+    assert len(result.errors) == 1
+    assert _reactor_warnings(result) == []
+
+
+def test_unreadable_reactor_cell_on_a_rejected_row_is_not_reported(db_session: Session):
+    """The warning says the rest of the row was uploaded; it was not."""
+    result = MasterBulkUploadService.from_bytes_ex(
+        db_session, _reactor_excel([(_v3_row("RXM_NOPE_998"), "nonsense")]))
+    assert result.created == 0
+    assert _reactor_warnings(result) == []
+
+
+def test_reactor_check_failure_never_turns_a_written_row_into_an_error(
+        db_session: Session, monkeypatch):
+    """The check runs after the vial-day is committed; it must not undo or fail it."""
+    from backend.services.bulk_uploads import master_bulk_upload as module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("lookup failed")
+
+    monkeypatch.setattr(module, "reactor_reference_matches", boom)
+    _seed_parr(db_session, "RXM_012", 97012)
+    result = MasterBulkUploadService.from_bytes_ex(
+        db_session, _reactor_excel([(_v3_row("RXM_012"), "R03")]))
+    assert result.errors == []
+    assert result.created == 1
+    assert len(result.feedbacks) == 1
+
+
+def test_reactor_mismatches_beyond_ten_still_name_the_first_ten(db_session: Session):
+    """The row list is the only place the sheet and app values appear."""
+    _seed_parr(db_session, "RXM_013", 97013)
+    result = MasterBulkUploadService.from_bytes_ex(db_session, _reactor_excel(
+        [(_v3_row("RXM_013", float(day)), "R03") for day in range(1, 13)]))
+    assert result.created == 12
+    (warning,) = _reactor_warnings(result)
+    assert "12 row(s)" in warning
+    assert "2 (RXM_013): sheet R03, app P03" in warning
+    assert "11 (RXM_013): sheet R03, app P03" in warning
+    assert "12 (RXM_013)" not in warning
+    assert "and 2 more" in warning

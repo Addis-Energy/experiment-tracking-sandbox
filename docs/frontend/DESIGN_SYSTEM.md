@@ -292,6 +292,49 @@ Use `PageSpinner` as the loading state for whole-page query loading. Use `Spinne
 
 ---
 
+### Breadcrumb
+
+```tsx
+<Breadcrumb
+  className="mb-1"
+  items={[
+    { label: 'Experiments', to: '/experiments' },
+    { label: experiment.experiment_id, mono: true },
+  ]}
+/>
+```
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `items` | `{ label: ReactNode; to?: string; mono?: boolean }[]` | Items with `to` render as links, the rest as text; `mono` sets the data font |
+| `className` | `string` | Extra classes on the line (spacing) |
+
+Renders `text-xs text-ink-muted` with `›` separators inside `<nav aria-label="Breadcrumb">`. Use it for every page trail above a title; do not hand-roll one (issue #155).
+
+---
+
+### SegmentLink (`src/components/runs/SegmentLink.tsx`)
+
+```tsx
+<SegmentLink id="HPHT_297-2" />
+<SegmentLink id={member.experiment_id}>{member.replicate_label}</SegmentLink>
+<SegmentLink id={vial.experiment_id} outlier={vial.is_outlier} />
+```
+
+| Prop | Type | Default | Description |
+|------|------|---------|-------------|
+| `id` | `string` | — | Experiment ID; links to `/experiments/{id}` (URL-encoded) |
+| `tab` | `string` | — | Adds `?tab=` for a detail-page tab |
+| `children` | `ReactNode` | the ID | Text shown in place of the ID |
+| `outlier` | `boolean` | `false` | Muted and struck through instead of red |
+| `inherit` | `boolean` | `false` | Keeps the surrounding text colour, dotted underline (inside a badge) |
+| `className` | `string` | — | Layout classes only; colour comes from `outlier` / `inherit` |
+| `stopPropagation` | `boolean` | `true` | Keeps the click from opening a click-to-edit row |
+
+Every printed experiment ID that has a detail page should be a `SegmentLink` (`font-mono-data text-red-400`). For a comma-separated list use `SegmentIdList` (`src/components/runs/runPageNav.tsx`). Never put a link inside a `Collapsible` header's `summary` (it renders in the toggle `<button>`); pass it as `links`, which renders beside the button (issue #158). Run-page routes come from `runPathFor(type, baseId)` and `runListPathFor(type)` in `src/utils/experimentId.ts`; never spell `/hpht/…` or `/core-floods/…` in a component.
+
+---
+
 ## Adding a New Component
 
 1. Create `src/components/ui/MyComponent.tsx`.

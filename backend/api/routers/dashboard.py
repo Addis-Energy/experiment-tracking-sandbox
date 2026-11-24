@@ -1,24 +1,32 @@
 from __future__ import annotations
 from datetime import date, datetime, timezone
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import select, func, case, distinct
 from sqlalchemy.orm import Session
 from database.models.experiments import Experiment, ExperimentNotes, ModificationsLog
 from database.models.conditions import ExperimentalConditions
-from database.models.results import ExperimentalResults, ScalarResults, ICPResults
+from database.models.results import ExperimentalResults, ScalarResults
 from database.models.enums import ExperimentStatus, NoteType
 from backend.api.dependencies.db import get_db
 from backend.auth.firebase_auth import verify_firebase_token, FirebaseUser
 from backend.api.schemas.dashboard import (
-    ReactorStatusResponse, ExperimentTimelineResponse, TimelinePoint,
     DashboardResponse, DashboardSummary, SlotOccupancy, ReactorCardData, GanttEntry, ActivityEntry,
     LatestModification, ReactorSpec,
 )
 from backend.services.workdays import workday_window, LAB_TZ
+from backend.services import run_service
+from backend.services.result_entry_service import _aware
 
 log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+def _type_text(experiment_type: object) -> str | None:
+    """A stored experiment_type as plain text: an enum's value, else str(), else None."""
+    if hasattr(experiment_type, "value"):
+        return experiment_type.value
+    return str(experiment_type) if experiment_type else None
+
 
 # Static reactor hardware specs, keyed by slot label (issue #147). The single
 # source of truth: the dashboard payload carries this table (`reactor_specs`),
@@ -72,6 +80,12 @@ def _occupancy(cards: list[ReactorCardData], prefix: str, total: int) -> SlotOcc
         queued=queued,
         empty=total - ongoing - queued,
     )
+
+
+def _samples_view(label: str) -> str:
+    """The run samples view a slot's card reads (issue #165): CF rigs read
+    v_core_flood_samples, R and P vessels v_hpht_samples."""
+    return "v_core_flood_samples" if label.startswith("CF") else "v_hpht_samples"
 
 
 @router.get("/", response_model=DashboardResponse)
@@ -131,12 +145,7 @@ def get_dashboard(
     reactor_cards: list[ReactorCardData] = []
     for row in reactor_rows:
         rn = row.reactor_number
-        exp_type = (
-            row.experiment_type.value
-            if hasattr(row.experiment_type, "value")
-            else str(row.experiment_type)
-            if row.experiment_type else None
-        )
+        exp_type = _type_text(row.experiment_type)
         # Stored, not re-derived (issue #97).
         label = row.reactor_slot
         if label in seen_labels:
@@ -211,6 +220,35 @@ def get_dashboard(
                     note_text=r.note_text or "", event_date=r.event_date, created_at=r.created_at,
                 )
 
+    # ── 2d. Run H2 to date and last sampled date per card (issue #165) ────
+    # A card's run is every segment sharing its base ID. CF cards read
+    # v_core_flood_samples, R/P cards v_hpht_samples: one fetch per view, so at
+    # most two queries for any number of cards. Both values come from the run's
+    # last non-variant sample in view order (cumulative time NULLS LAST); the
+    # date is that sample's sample_date as a lab-local calendar date, with no
+    # fallback to an earlier dated sample. This deliberately differs from
+    # hpht_service.list_runs' "max dated sample" (Mat, 2026-11-10).
+    bases_by_view: dict[str, set[str]] = {}
+    for c in reactor_cards:
+        if c.base_experiment_id:
+            view = _samples_view(c.reactor_label)
+            bases_by_view.setdefault(view, set()).add(c.base_experiment_id)
+    latest_by_view = {
+        view: run_service.latest_sample_by_base(
+            run_service.fetch_samples(db, view, base_ids=sorted(bases)))
+        for view, bases in bases_by_view.items()
+    }
+    for c in reactor_cards:
+        if not c.base_experiment_id:
+            continue
+        view = _samples_view(c.reactor_label)
+        last = latest_by_view.get(view, {}).get(c.base_experiment_id)
+        if last is None:
+            continue
+        c.cumulative_h2_grams_per_ton = last["cumulative_h2_grams_per_ton"]
+        if last["sample_date"] is not None:
+            c.last_sampled_date = _aware(last["sample_date"]).astimezone(LAB_TZ).date()
+
     # ── 2c. Workday-window KPI counts + slot occupancy ─────────────────────
     # ET is used here (not UTC) because "last 7 workdays" is a statement about
     # the lab's week — see design notes in issue #85. This is now the SAME
@@ -274,12 +312,7 @@ def get_dashboard(
     timeline: list[GanttEntry] = []
     for row in gantt_rows:
         status = row.status
-        exp_type = (
-            row.experiment_type.value
-            if hasattr(row.experiment_type, "value")
-            else str(row.experiment_type)
-            if row.experiment_type else None
-        )
+        exp_type = _type_text(row.experiment_type)
         ended_at = row.updated_at if status != ExperimentStatus.ONGOING else None
         start = row.date or row.created_at
         days = None
@@ -330,108 +363,4 @@ def get_dashboard(
         reactor_specs={label: ReactorSpec(**spec) for label, spec in REACTOR_SPECS.items()},
         timeline=timeline,
         recent_activity=recent_activity,
-    )
-
-
-@router.get("/reactor-status", response_model=list[ReactorStatusResponse])
-def get_reactor_status(
-    db: Session = Depends(get_db),
-    current_user: FirebaseUser = Depends(verify_firebase_token),
-) -> list[ReactorStatusResponse]:
-    """Single query: all reactors with their current ONGOING experiment. No N+1."""
-    rows = db.execute(
-        select(
-            ExperimentalConditions.reactor_number,
-            ExperimentalConditions.reactor_slot,
-            Experiment.id,
-            Experiment.experiment_id,
-            Experiment.status,
-            Experiment.created_at,
-            Experiment.date,                          # ← use date (with created_at fallback) for started_at
-            ExperimentalConditions.temperature_c,
-            ExperimentalConditions.experiment_type,
-        )
-        .join(Experiment, Experiment.id == ExperimentalConditions.experiment_fk)
-        # Legacy endpoint: intentionally filters ONGOING only.
-        # The reactor cards query (/api/dashboard/reactor-cards) includes QUEUED.
-        # Do not change this filter without verifying no downstream callers depend on ONGOING-only behavior.
-        .where(Experiment.status == ExperimentStatus.ONGOING)
-        # reactor_slot is NULL for anything that holds no physical vessel — a
-        # non-occupancy type, a missing reactor_number, or reactor_number <= 0
-        # (issue #97).
-        .where(ExperimentalConditions.reactor_slot.isnot(None))
-        .order_by(ExperimentalConditions.reactor_number, Experiment.created_at.desc())
-    ).all()
-
-    # Deduplicate: keep first (most-recent) per label (CF01/R01 are separate slots)
-    seen: set[str] = set()
-    result: list[ReactorStatusResponse] = []
-    for row in rows:
-        rn = row.reactor_number
-        # No exp_type/is_cf derivation needed here (issue #97): label is read
-        # straight from the stored slot, and ReactorStatusResponse.experiment_type
-        # is populated from row.experiment_type directly, below.
-        label = row.reactor_slot
-        if label in seen:
-            continue
-        seen.add(label)
-        start = row.date or row.created_at
-        result.append(ReactorStatusResponse(
-            reactor_number=rn,
-            experiment_id=row.experiment_id,
-            status=row.status,
-            experiment_db_id=row.id,
-            started_at=start,
-            temperature_c=row.temperature_c,
-            experiment_type=row.experiment_type,
-        ))
-    return result
-
-
-@router.get("/timeline/{experiment_id}", response_model=ExperimentTimelineResponse)
-def get_experiment_timeline(
-    experiment_id: str,
-    db: Session = Depends(get_db),
-    current_user: FirebaseUser = Depends(verify_firebase_token),
-) -> ExperimentTimelineResponse:
-    """Return all result timepoints for an experiment with data-presence flags."""
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
-
-    results = db.execute(
-        select(ExperimentalResults)
-        .where(ExperimentalResults.experiment_fk == exp.id)
-        .order_by(ExperimentalResults.time_post_reaction_days)
-    ).scalars().all()
-
-    # Check scalar/ICP presence in bulk (avoid N+1)
-    result_ids = [r.id for r in results]
-    scalar_ids = set(
-        db.execute(select(ScalarResults.result_id).where(ScalarResults.result_id.in_(result_ids)))
-        .scalars().all()
-    )
-    icp_ids = set(
-        db.execute(select(ICPResults.result_id).where(ICPResults.result_id.in_(result_ids)))
-        .scalars().all()
-    )
-
-    timepoints = [
-        TimelinePoint(
-            result_id=r.id,
-            time_post_reaction_days=r.time_post_reaction_days,
-            time_post_reaction_bucket_days=r.time_post_reaction_bucket_days,
-            is_primary=r.is_primary_timepoint_result,
-            has_scalar=r.id in scalar_ids,
-            has_icp=r.id in icp_ids,
-        )
-        for r in results
-    ]
-
-    return ExperimentTimelineResponse(
-        experiment_id=experiment_id,
-        status=exp.status,
-        timepoints=timepoints,
     )

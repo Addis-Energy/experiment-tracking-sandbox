@@ -51,6 +51,8 @@ from database.models.results import ExperimentalResults
 # sync_result_note. A result-scoped note signed with one of these sits in that
 # parser's slot. Timepoint Modifications signs with the uploader's email and
 # new_experiments writes experiment-level descriptions, so neither is here.
+# 'quick_upload' is a retired signer: its parser was deleted in issue #189, but
+# notes it wrote keep the tag, so they must still leave the slot when edited.
 UPLOAD_SLOT_SIGNERS: frozenset[str] = frozenset({"master_bulk_upload", "scalar_results", "quick_upload"})
 
 
@@ -176,3 +178,23 @@ def release_upload_slot(note: ExperimentNotes, editor: str) -> Optional[str]:
     previous = note.created_by
     note.created_by = editor
     return previous
+
+
+def breaks_note_scope(note_type: NoteType, result_id: Optional[int], event_date: Optional[date]) -> bool:
+    """True when a note of ``note_type`` with this anchor would violate ck_note_scope.
+
+    The one Python mirror of that CHECK constraint (issue #190, D-06); the API
+    uses it to answer 422 with a readable message before the database refuses:
+
+    - 'description' is experiment-level, so it never has a result_id;
+    - 'modification' needs an anchor: a result_id or an event_date;
+    - 'result_note' always has a result_id;
+    - 'observation' may be anything.
+    """
+    if note_type is NoteType.description:
+        return result_id is not None
+    if note_type is NoteType.modification:
+        return result_id is None and event_date is None
+    if note_type is NoteType.result_note:
+        return result_id is None
+    return False

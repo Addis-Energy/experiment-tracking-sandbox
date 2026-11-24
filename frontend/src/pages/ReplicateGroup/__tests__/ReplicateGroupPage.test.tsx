@@ -97,6 +97,14 @@ describe('ReplicateGroupPage', () => {
     expect(screen.queryByText('0 (parent)')).not.toBeInTheDocument()
   })
 
+  it("links each member's Results count to its Results tab (issue #162)", async () => {
+    vi.mocked(experimentsApi.getGroup).mockResolvedValue(ORPHAN_GROUP)
+    renderAtBase('SERUM_001')
+    const link = await screen.findByTitle('Open the Results tab of SERUM_001a')
+    expect(link).toHaveAttribute('href', '/experiments/SERUM_001a?tab=results')
+    expect(link).toHaveTextContent('2')
+  })
+
   it('shows the additive summary when additives do not diverge', async () => {
     vi.mocked(experimentsApi.getGroup).mockResolvedValue(ORPHAN_GROUP)
     renderAtBase('SERUM_001')
@@ -160,6 +168,19 @@ describe('ReplicateGroupPage', () => {
     vi.mocked(experimentsApi.getGroup).mockRejectedValue(new Error('404'))
     renderAtBase('UNKNOWN_BASE')
     await waitFor(() => expect(screen.getByText('Replicate group not found')).toBeInTheDocument())
+    // Issue #159: a way out of the dead end.
+    expect(screen.getByRole('link', { name: 'Back to Experiments' })).toHaveAttribute('href', '/experiments')
+  })
+
+  it('puts the Rollup first, then Members, then Conditions (issue #160)', async () => {
+    vi.mocked(experimentsApi.getGroup).mockResolvedValue(ORPHAN_GROUP)
+    renderAtBase('SERUM_001')
+    const rollup = await screen.findByText('Rollup')
+    const members = screen.getByRole('columnheader', { name: 'Replicate' })
+    const conditions = screen.getByText('Conditions')
+    const follows = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(follows(rollup, members)).toBe(true)
+    expect(follows(members, conditions)).toBe(true)
   })
 
   it('issues the group query against the base ID, not a per-experiment endpoint', async () => {
@@ -186,7 +207,7 @@ describe('ReplicateGroupPage', () => {
     expect(screen.queryByText('Confining Pressure:')).not.toBeInTheDocument()
   })
 
-  it('rounds a long float to 3 decimal places', async () => {
+  it('rounds a long float to 1 decimal place (issue #169)', async () => {
     vi.mocked(experimentsApi.getGroup).mockResolvedValue({
       ...ORPHAN_GROUP,
       shared_conditions: {
@@ -196,7 +217,7 @@ describe('ReplicateGroupPage', () => {
     })
     renderAtBase('SERUM_001')
 
-    await waitFor(() => expect(screen.getByText('0.409')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('0.4')).toBeInTheDocument())
   })
 
   it('renders an integer-valued condition without a trailing decimal', async () => {

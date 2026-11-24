@@ -4,7 +4,9 @@ import { useQuery } from '@tanstack/react-query'
 import type { HphtConditionsSummary } from '@/api/hpht'
 import { chemicalsApi } from '@/api/chemicals'
 import { Card, CardHeader } from '@/components/ui'
+import { SegmentLink } from '@/components/runs/SegmentLink'
 import { fmt } from '@/components/results/sampleFields'
+import { formatPrecise } from '@/utils/numberFormat'
 import { labDateOf } from '@/utils/labDate'
 
 const HEADING = 'text-xs font-semibold text-ink-secondary uppercase tracking-wider'
@@ -21,8 +23,10 @@ function Item({ label, children }: { label: string; children: ReactNode }) {
 const withUnit = (v: number | null, unit: string) => (v == null ? '—' : `${fmt(v)} ${unit}`)
 
 /** Read-only setup of the run's latest non-variant segment, with its additives.
- *  Edits happen on that segment's Conditions tab. */
-export function ConditionsSummaryCard({ conditions }: { conditions: HphtConditionsSummary | null }) {
+ *  Edits happen on the run page's Conditions tab, with that segment selected. */
+export function ConditionsSummaryCard({
+  conditions, conditionsHref,
+}: { conditions: HphtConditionsSummary | null; conditionsHref: string }) {
   const experimentId = conditions?.experiment_id
   // An additives failure leaves the row as "—"; the rest of the card still renders.
   const { data: additives } = useQuery({
@@ -39,17 +43,16 @@ export function ConditionsSummaryCard({ conditions }: { conditions: HphtConditio
             <h2 id="conditions-heading" className={HEADING}>
               Conditions
               {experimentId && (
-                <span className="ml-2 normal-case tracking-normal font-normal text-ink-muted font-mono-data">
-                  {experimentId}
-                </span>
+                <SegmentLink
+                  id={experimentId}
+                  to={conditionsHref}
+                  className="ml-2 normal-case tracking-normal font-normal"
+                />
               )}
             </h2>
             {experimentId && (
-              <Link
-                to={`/experiments/${encodeURIComponent(experimentId)}`}
-                className="text-xs text-red-400 hover:text-red-300"
-              >
-                Edit on Conditions tab
+              <Link to={conditionsHref} className="text-xs text-red-400 hover:text-red-300">
+                Edit conditions
               </Link>
             )}
           </div>
@@ -66,7 +69,7 @@ export function ConditionsSummaryCard({ conditions }: { conditions: HphtConditio
               <Item label="W:R">{fmt(conditions.water_to_rock_ratio)}</Item>
               <Item label="Catalyst">
                 {conditions.catalyst
-                  ? `${conditions.catalyst}${conditions.catalyst_ppm != null ? ` (${fmt(conditions.catalyst_ppm)} ppm)` : ''}`
+                  ? `${conditions.catalyst}${conditions.catalyst_ppm != null ? ` (${formatPrecise(conditions.catalyst_ppm)} ppm)` : ''}`
                   : '—'}
               </Item>
               <Item label="Feedstock">{conditions.feedstock ?? '—'}</Item>
@@ -77,7 +80,7 @@ export function ConditionsSummaryCard({ conditions }: { conditions: HphtConditio
                   <ul className="space-y-0.5">
                     {additives.map((a) => (
                       <li key={a.id}>
-                        {a.compound?.name ?? `Compound #${a.compound_id}`} {fmt(a.amount)} {a.unit}
+                        {a.compound?.name ?? `Compound #${a.compound_id}`} {formatPrecise(a.amount)} {a.unit}
                       </li>
                     ))}
                   </ul>

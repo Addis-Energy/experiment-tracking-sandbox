@@ -9,13 +9,15 @@ Run values are read from the series' samples view, never recomputed here.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Protocol, Sequence, TypeVar
 
-from sqlalchemy import select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session, selectinload
 
 from backend.api.schemas.runs import RunSegment
+from backend.services.experiment_lookup import is_variant
 from backend.services.icp_series import ICP_SELECT, icp_rows
 from backend.api.schemas.results import IcpRow
 from backend.services.result_entry_service import _aware
@@ -38,23 +40,53 @@ def _view(name: str) -> str:
     return name
 
 
+def resolve_base_id(db: Session, experiment_or_base_id: str) -> str:
+    """base_experiment_id of the experiment with this ID, or the ID
+    itself when it is already a base or matches no experiment (so the
+    caller's not-found path still runs).
+
+    Lets a run URL take the segment ID a researcher copies from a
+    reactor card (HPHT_297-2, CF_020-5_Bypass1) as well as the base
+    (issue #158). Type-blind: the caller's `include` predicate still
+    decides whether the run is its kind.
+    """
+    base = db.execute(
+        select(Experiment.base_experiment_id)
+        .where(Experiment.experiment_id == experiment_or_base_id)
+    ).scalar_one_or_none()
+    return base or experiment_or_base_id
+
+
 def load_segments(
     db: Session,
     *,
     include: Callable[[ExperimentalConditions], bool],
     base_id: str | None = None,
+    type_contains: Sequence[str] | None = None,
 ) -> dict[str, list[RunSegment]]:
-    """Segments whose conditions pass `include`, grouped by base_experiment_id (one query)."""
+    """Segments whose conditions pass `include`, grouped by base_experiment_id (one query).
+
+    `include` is the rule. `type_contains` only narrows what the database
+    sends back (issue #191, E-12): rows whose lower-cased experiment_type
+    contains none of these substrings are skipped in SQL instead of being
+    loaded and then rejected by `include`. It must be a superset of what
+    `include` accepts; a series passes the substrings every accepted spelling
+    of its type contains (see HPHT_TYPE_CONTAINS, CORE_FLOOD_TYPE_CONTAINS).
+    """
     stmt = (
         select(Experiment, ExperimentalConditions)
         .join(ExperimentalConditions, ExperimentalConditions.experiment_fk == Experiment.id)
         .where(Experiment.base_experiment_id.is_not(None))
         .options(selectinload(Experiment.parent), selectinload(Experiment.description_note))
-        # Lowest conditions id first, so the `seen` guard matches _conditions_for.
+        # Lowest conditions id first, so the `seen` guard matches
+        # result_entry_service.conditions_for.
         .order_by(Experiment.id, ExperimentalConditions.id)
     )
     if base_id is not None:
         stmt = stmt.where(Experiment.base_experiment_id == base_id)
+    if type_contains:
+        lowered = func.lower(ExperimentalConditions.experiment_type)
+        stmt = stmt.where(or_(*[lowered.contains(part, autoescape=True) for part in type_contains]))
     grouped: dict[str, list[RunSegment]] = defaultdict(list)
     seen: set[int] = set()
     for exp, cond in db.execute(stmt).all():
@@ -69,8 +101,7 @@ def load_segments(
             status=exp.status.value if exp.status is not None else None,
             date=exp.date,
             parent_experiment_id=parent.experiment_id if parent is not None else None,
-            is_variant=parent is not None
-            and exp.experiment_id.startswith(parent.experiment_id + "_"),
+            is_variant=is_variant(exp),
             description=exp.description,
             conditions_id=cond.id,
             pore_volume_mL=cond.pore_volume_mL,
@@ -91,14 +122,31 @@ def latest_segment(segments: Sequence[RunSegment]) -> RunSegment:
     return max(segments, key=lambda s: (s.date is not None, _aware(s.date) or _EPOCH, s.id))
 
 
+M = TypeVar("M")
+
+
+def root_description(ordered: Sequence[M], is_root: Callable[[M], bool]) -> str | None:
+    """The description that stands for a whole run or lineage.
+
+    ``ordered`` is the members in the caller's display order; each has a
+    ``description``. The first root's description wins; if there is no root, or
+    it has none, the first member that has one. The run pages and the Excel
+    export share this rule (issue #190, D-16) and differ only in the order
+    they pass in.
+    """
+    roots = [m for m in ordered if is_root(m)]
+    if roots and roots[0].description:
+        return roots[0].description
+    return next((m.description for m in ordered if m.description), None)
+
+
 def run_description(segments: list[RunSegment]) -> str | None:
     """Root segment's description (non-variant, no parent, earliest date); else the
     first segment that has one."""
-    ordered = by_date(segments)
-    roots = [s for s in ordered if not s.is_variant and s.parent_experiment_id is None]
-    if roots and roots[0].description:
-        return roots[0].description
-    return next((s.description for s in ordered if s.description), None)
+    return root_description(
+        by_date(segments),
+        is_root=lambda s: not s.is_variant and s.parent_experiment_id is None,
+    )
 
 
 def ongoing_ids(segments: Iterable[RunSegment]) -> list[str]:
@@ -153,6 +201,96 @@ def sort_runs(items: list[T]) -> list[T]:
     return items
 
 
+@dataclass(frozen=True)
+class RunSummary:
+    """What every run list row is built from, whatever the series."""
+
+    base_id: str
+    segments: list[RunSegment]
+    description: str | None
+    ongoing_experiment_ids: list[str]
+    samples: list[dict]        # every view row of the run, side samples included
+    real_samples: list[dict]   # the same without side samples (is_variant)
+    first_sample_date: datetime | None
+    last_sample_date: datetime | None
+    latest_cumulative_h2_grams_per_ton: float | None
+
+
+def resolve_run(
+    db: Session, requested_id: str, *,
+    include: Callable[[ExperimentalConditions], bool],
+    not_found: Callable[[str], Exception],
+    type_contains: Sequence[str] | None = None,
+) -> tuple[str, list[RunSegment]]:
+    """Base ID and segments (unsorted) of the run ``requested_id`` names: a
+    base, segment or variant ID (issue #158).
+
+    Raises ``not_found(requested_id)`` when no segment passes ``include``, so
+    the error names the ID the caller sent.
+    """
+    base_id = resolve_base_id(db, requested_id)
+    segments = load_segments(
+        db, include=include, base_id=base_id, type_contains=type_contains).get(base_id)
+    if not segments:
+        raise not_found(requested_id)
+    return base_id, segments
+
+
+def summarize_runs(
+    db: Session, *,
+    include: Callable[[ExperimentalConditions], bool],
+    view: str,
+    scope: str = "active",
+    q: str | None = None,
+    type_contains: Sequence[str] | None = None,
+) -> list[RunSummary]:
+    """One summary per run of a series, for its list page (issue #190, D-17).
+
+    ``scope="active"`` keeps runs with an ONGOING segment; ``q`` filters on the
+    base ID, any segment ID or the description. Unsorted: each series sorts its
+    own list. Two queries, whatever the number of runs.
+
+    The scope and ``q`` filters need only the segments, so they run first and
+    samples are fetched just for the runs that remain (issue #191, E-12): the
+    default "active" list no longer reads every finished run's samples.
+    """
+    by_base = load_segments(db, include=include, type_contains=type_contains)
+    needle = normalize_query(q)
+    kept: list[tuple[str, list[RunSegment], str | None, list[str]]] = []
+    for base_id, segments in by_base.items():
+        description = run_description(segments)
+        if not matches(needle, base_id, segments, description):
+            continue
+        ongoing = ongoing_ids(segments)
+        if scope == "active" and not ongoing:
+            continue
+        kept.append((base_id, segments, description, ongoing))
+
+    samples_by_base: dict[str, list[dict]] = defaultdict(list)
+    for row in fetch_samples(db, view, base_ids=[base_id for base_id, *_ in kept]):
+        samples_by_base[row["run_base_id"]].append(row)
+
+    summaries: list[RunSummary] = []
+    for base_id, segments, description, ongoing in kept:
+        samples = samples_by_base.get(base_id, [])
+        real = [r for r in samples if not r["is_variant"]]
+        dates = [_aware(r["sample_date"]) for r in real if r["sample_date"] is not None]
+        summaries.append(RunSummary(
+            base_id=base_id,
+            segments=segments,
+            description=description,
+            ongoing_experiment_ids=ongoing,
+            samples=samples,
+            real_samples=real,
+            first_sample_date=min(dates) if dates else None,
+            last_sample_date=max(dates) if dates else None,
+            # Rows arrive in view order, so the last one is the latest sample.
+            latest_cumulative_h2_grams_per_ton=(
+                real[-1]["cumulative_h2_grams_per_ton"] if real else None),
+        ))
+    return summaries
+
+
 def fetch_samples(
     db: Session, view: str, *, base_ids: list[str] | None = None,
     result_id: int | None = None,
@@ -174,6 +312,23 @@ def fetch_samples(
     sql += (" ORDER BY run_base_id, cumulative_time_post_reaction_days NULLS LAST,"
             " result_id")
     return [dict(r) for r in db.execute(text(sql), params).mappings()]
+
+
+def latest_sample_by_base(rows: Iterable[dict]) -> dict[str, dict]:
+    """The last non-variant row per run_base_id, given rows in view order.
+
+    Rows come from `fetch_samples`, ordered by run_base_id, then
+    cumulative_time_post_reaction_days NULLS LAST, then result_id, so the last
+    row seen for a base is the run's latest sample. Rows without a base ID are
+    skipped. The dashboard's reactor cards read their run H2 and last sampled
+    date from this row (issue #165).
+    """
+    latest: dict[str, dict] = {}
+    for r in rows:
+        if r["is_variant"] or r["run_base_id"] is None:
+            continue
+        latest[r["run_base_id"]] = r
+    return latest
 
 
 def attach_notes(db: Session, rows: list[dict]) -> list[dict]:

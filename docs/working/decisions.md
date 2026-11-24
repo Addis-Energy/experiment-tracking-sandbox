@@ -838,3 +838,133 @@ Alembic `b8c4e2d7f9a1`; the 2026-09-08 entry above (dual-write).
 - Existing data is flagged only from a list the experimenters confirm (`set_background_flags_023.py`, after #151).
 
 **Related:** Alembic `e4b9c2d7a6f1`; `.claude/rules/MODELS.md`; `.claude/rules/MODELS-views.md`; `docs/user_guide/REPLICATES.md`.
+
+## 2026-11-11 — Last sample date and lab-local date filters (issue #168)
+
+**Decision (Mat):** an experiment's last sample date (`last_result_date`) is the America/New_York calendar date of `MAX(scalar_results.measurement_date)` over its own results, with no fallback to start date + days and no ICP `sample_date`. A list row that stands for several experiments shows the **latest** date among them: a flat vial row over its matched vials, a grouped row over its whole group, a letter child over its own vials. Both date filter pairs (start date, last sample date) compare as inclusive lab-local calendar dates.
+
+**Consequences:**
+- `date_from`/`date_to` are typed dates; a run started at 14:00 ET on the End day is now included (333 of 2,067 dated experiments in the 2026-11-06 dump had a non-midnight start time and could be dropped before).
+- The filter tests each experiment row; the latest-date rule applies only to what a collapsed row displays.
+- The Data Export workbook's Experiments tab header changed from `Date` to `Start date`.
+- The 500-experiment export cap is gone; the only export limit is Excel's sheet row limit.
+
+**Related:** `backend/api/routers/experiments.py` (`_last_result_date_expr`, `_latest_last_result_date`); `docs/api/API_REFERENCE.md`.
+
+## 2026-11-12 — API requires the `approved` claim; no passwords at registration (issue #170)
+
+**Decision (Mat):** prod is moving to a public cloud host (Tailscale access is ending), so auth must stand on its own without the LAN.
+- `verify_firebase_token` returns 403 "Account not approved" unless the ID token's `approved` custom claim is exactly `True`; invalid or missing tokens stay 401.
+- Access requests collect no password. Approval creates the Firebase user with a random password and returns a password-reset link that the admin sends (it expires after about 1 hour; `reset-password` reissues it).
+- Firestore `pending_users` must never hold a password.
+- Firebase self sign-up is disabled in the console as a second layer.
+
+**Consequences:**
+- Every account needs `approved: True`. Users created outside `approve_user` must get `set-claims`, and `manage_users.py audit-claims` checks this before deploys.
+- The frontend force-refreshes the token on load and signs out unapproved users.
+- `role` is still informational (users pick it themselves).
+- Out of scope, by decision: `check_revoked=True`, role-based authorization, and IP/device allowlisting (deferred).
+
+**Related:** `.claude/rules/AUTH.md`; `docs/superpowers/plans/2026-11-12-auth-hardening.md`; issue-log entry for #170 (rollout runbook).
+
+## 2026-11-12 — One display precision for numbers (issue #169)
+
+**Decision (Mat):** displayed numbers use one shared formatter: 1 dp with the trailing zero trimmed, and a nonzero value that would round to 0 shows as `<0.1` (`>-0.1`), never `0`. Hovering a rounded value shows the stored number. Up to 3 dp (no `<0.1` rule) is kept where 1 dp loses real information: day / T+ / tube labels, core flood flow rates, catalyst ppm, additive amounts and chemical densities (Mat chose all three of the last), plus CO₂ partial pressure and the Replicate Group divergence columns (both added during implementation).
+
+**Consequences:**
+- Display only. Stored values, API payloads, exports and views keep full precision; form prefills are never rounded.
+- Not covered: the backend-built `additives_summary` string (Experiments, Data Export, Replicate Group), sample latitude/longitude (identifiers, kept raw), Recharts axis ticks, and free text.
+
+**Related:** `frontend/src/utils/numberFormat.ts`, `frontend/src/components/ui/Num.tsx`; `docs/CODE_STANDARDS.md`.
+
+## 2026-11-13 — Shared backend helpers that new code must use (issue #190, sweep PR 2)
+
+**Decision:** The #167 sweep found the same rules written out at many call sites. Issue #190 gave each rule one definition. New code must call these helpers; do not write the query or rule inline again.
+
+**Contracts:**
+
+- **Find an experiment by its exact ID** — `backend/services/experiment_lookup.py::find_experiment(db, experiment_id)` returns the row or `None`. In a router, use `backend/api/routers/_helpers.py::get_experiment_or_404(db, experiment_id, detail="Experiment not found")`. Both match the ID exactly. Lenient matching of IDs typed into upload sheets stays in `bulk_uploads/_id_match.py`.
+- **The series an experiment belongs to** — `experiment_lookup.series_key(exp)` is `base_experiment_id`, else the experiment's own ID. It is the Python twin of `COALESCE(base_experiment_id, experiment_id)` in the views. `h2_background.group_key` is the same function under its older name.
+- **The conditions row of an experiment** — `experiment_lookup.lowest_conditions(db, experiment_fk)`, or `lowest_conditions_map(db, experiment_fks)` for many experiments in one query. The lowest id wins and the query uses `.first()`, never `scalar_one_or_none()`: a database that predates `uq_conditions_experiment_fk` can hold a duplicate row, and that must not raise (issue #109).
+- **The scalar rows of an experiment** — `experiment_lookup.scalars_for_experiment(db, experiment_fk)`, one join, in id order.
+- **Is this a side sample** — `experiment_lookup.is_variant(exp)`: the ID is `<parent ID>_<Text>`. The SQL copies in `v_core_flood_samples`, `v_hpht_samples` and `icp_series._IS_VARIANT` stay; change all of them together.
+- **Writing a chemical additive from the API** — `backend/services/additive_service.py` (`upsert_additive`, `patch_additive`, `delete_additive`). It flushes, then calls `recalculate(additive, db)` explicitly, then writes the audit row; the caller commits. **The explicit recalculate must stay**: the mapper listener in `database/event_listeners.py` runs before the additive's relationships are loaded, so it cannot be relied on to produce the stored derived fields (sweep H-06; its removal is tracked in #175).
+- **`ModificationsLog.modified_by` is the user's email on every path** (sweep H-05). The experiments router wrote the Firebase uid before this change. Existing rows were not backfilled, so a reader of old rows can still meet a uid.
+- **Values written to `ModificationsLog.old_values` / `new_values`** — `backend/services/audit.py::audit_jsonable(value)` and `audit_values(mapping)`. The date check runs before the Enum check on purpose: a pandas `Timestamp` has a `.value` attribute (integer nanoseconds) and must be stored as its ISO string.
+- **A ModificationsLog row in an API response** — `backend/api/schemas/experiments.py::ModificationResponse`. Notes use `NoteResponse`. Do not hand-build these dicts.
+- **The `ck_note_scope` rule in Python** — `backend/services/notes.py::breaks_note_scope(note_type, result_id, event_date)`. Each endpoint keeps its own 422 wording; only the rule is shared.
+- **Mapping service exceptions to HTTP errors** — `_helpers.call_or_http(fn, errors, detail=str)`. List a subclass before its base class.
+- **Molar masses and the default background ammonium** — `backend/services/physical_constants.py`. Do not write `55.845`, `2.01588`, `18.04` or `0.2` inline. The module sits outside the `calculations` package because that package imports `conditions_calcs`, which imports `elemental_composition_service`; a constants module inside the package would be a circular import.
+- **Run list pages** — `run_service.summarize_runs` and `resolve_run` hold the logic the Core Flood and HPHT services share. A new run series builds its list from `RunSummary` and supplies its own list item, warnings and sort order.
+- **Experiment ID prefixes** — `_TYPE_PREFIX` in `routers/experiments.py` is the one table for `/next-id` and `/next-ids`. The canonical Autoclave prefix is `AUTOCLAVE` (sweep H-04); existing IDs are never renamed.
+
+**Why:** Dead code and repeated logic made every feature issue slower to scope, and one copy had already drifted: `/next-ids` searched for `Autoclave_%` while every Autoclave ID is `AUTOCLAVE_…`, so it always answered 1 (sweep defect X-09).
+
+**Scope and proof:** No stored value changed. The derived-column diff (`recalculate_all_registry_012.py` on a copy of the dev database, `develop` vs the branch) was identical across 11,369 rows of `experimental_conditions`, `chemical_additives`, `scalar_results` and `experimental_results`. Not done here: D-04 (read the additives summary from its view in the experiments list) moved to #191 with E-01; the locked parsers' own copies of these rules are #172.
+
+**Related:** `docs/issues/sweep-2026-11-backend-findings.md` (D-01 to D-18); epic #192.
+
+## 2026-11-13 — No per-row queries in list and recalculation paths (issue #191, sweep PR 3)
+
+**Decision:** Endpoints that return or recalculate many rows fetch what those rows need once, before the loop. Each is guarded by a query-count test (`tests/api/test_query_counts.py`) that runs the same request on a small and a larger data set and requires the same number of statements.
+
+**Contracts:**
+
+- **Experiments list** (`routers/experiments.py`): `_build_list_item(exp, lookups)` issues no query. Anything a list row needs is added to `_ListLookups` (one query for the page) or loaded with the row (`selectinload(Experiment.description_note)`). Grouped mode resolves every bucket and every last result date before the item loop.
+- **Additives summary text** is ordered by compound id (`_additive_summaries`). That is the order the list has always shown on the dev database. `v_experiment_additives_summary` builds the same text with no `ORDER BY` and disagrees for about a third of experiments, so the list does not read the view (sweep D-04). Giving the view an order needs a migration; until then the two can show the same additives in a different order.
+- **Conditions cascade**: `recalculate_conditions` recalculates the experiment's scalars. Do not recalculate them again after it (see `docs/CALCULATIONS.md`).
+- **Weak references**: the SQLAlchemy session holds loaded rows weakly. A preload whose return value is dropped can be garbage-collected before the code that needs it runs. Keep a reference (`_preload_scalars` reads the collection first; `delete_experiment_cascade` holds `preloaded` until after the commit).
+- **Run lists**: `run_service.load_segments(type_contains=...)` narrows the SQL only. The Python rule (`is_hpht`, `is_core_flood`) decides, and the substrings must match every spelling that rule accepts (`HPHT_TYPE_CONTAINS`, `CORE_FLOOD_TYPE_CONTAINS`; guarded by `test_type_prefilters_never_exclude_a_spelling_the_python_rule_accepts`). A new accepted spelling in `database/reactor_slot.py::_SERIES_BY_TYPE` must keep that test passing.
+- **Cumulative times**: `update_cumulative_times_for_chain` loads a chain once. Per-upload-row calls from the locked parsers remain (#172).
+
+**Why:** the experiments list issued 3 queries per row and about 16 per replicate group; a sample change recalculated every scalar twice; the cumulative-time update re-walked the whole lineage for every experiment of a chain on every uploaded row.
+
+**Scope and proof:** no stored value changed. On a copy of the dev database, the recalculation migration, the elemental recalculation, 60 background-ammonium edits, 72 sample changes, a cumulative-time update of all 2,011 experiments and migration 014 were run with `develop` and with the branch: 11,369 rows of the four derived-value tables were byte-identical. Not done: E-15 (the work is inside the locked ActLabs parser, #172) and E-13 (waits on #171).
+
+**Related:** `docs/issues/sweep-2026-11-backend-findings.md` (E-01 to E-15, D-04); epic #192.
+
+## 2026-11-17 — Production moves to Azure (issue #196)
+
+**Decision:** Production moves from the lab PC to Azure App Service (Linux, Python 3.13, one worker) with PostgreSQL 18 Flexible Server and a private Blob container for sample photos, at `https://data.addisenergy.com`. Cutover is 2026-12-03; the lab PC is retired by 2026-12-15 (`docs/deployment/AZURE_RUNBOOK.md` R2, R6). Design: `docs/superpowers/specs/2026-11-17-azure-migration-design.md`.
+
+**Contracts:**
+
+- **Timezone:** the server timezone is set (`TZ=America/New_York` on App Service, `America/New_York` on Postgres) instead of changing code, because the bulk-upload parsers are locked and several call `datetime.now()`.
+- **Deploy:** nightly at 02:00 Eastern plus manual dispatch of the "Deploy to Azure" workflow, not on every push to `main`; one run at a time; migrations run in the workflow.
+- **Photos:** stored in a private Blob container (`PHOTO_STORAGE=blob`), blob name `<sample_id>/<stem>_<uuid8><ext>`; `local` stays the default so the lab PC and dev are unaffected.
+- **Researcher DB access:** read-only, one login per person (member of `reporting_reader`), on request, with a firewall rule per IP (`scripts/azure/grant_db_access.sh`). No "Allow Azure services" firewall rule.
+- **Ownership:** `experiments_app` owns the database and every object; default privileges are granted `FOR ROLE experiments_app`.
+
+**Why:** Tailscale access ends, and the team needs the app from any network (see `cloud-hosting-migration-decision` memory, 2026-11-12). Power BI is retired, so the views are read only by the app and by per-person psql logins.
+
+## 2026-11-19 — One page per HPHT / Core Flood run (`feat/segment-run-clarity`)
+
+**Decision (Mat, 2026-11-19):** an HPHT or Core Flood experiment has one page, its run page (`/hpht/{base}`, `/core-floods/{base}`). The segment detail page is no longer a destination for those types. When a specific segment is opened, the whole run is shown with that segment's rows marked. Design: `docs/superpowers/specs/2026-11-19-one-page-per-run-design.md`.
+
+**Contracts:**
+
+- **One path helper:** `experimentHomePath(type, experimentId, baseId, tab?)` in `frontend/src/utils/experimentId.ts` is where the destination of an experiment is spelled. Callers that know the type use it; callers that do not link to `/experiments/{id}` and rely on the redirect.
+- **URL state of a run page:** `?segment={experiment_id}&only=1&tab=results|conditions|notes|xrd|logs`, parsed and written only by `components/runs/runView.ts`. With no `segment` the selected segment is the first ONGOING non-variant, else the latest. `only` is ignored on a single-segment run and for a side sample.
+- **Redirect:** `/experiments/{id}` redirects (replace) to the run page only when the experiment's type has a run page and a run fetched after mount contains it. Otherwise the detail page renders, so no experiment becomes unreachable.
+- **Record header and tabs:** the run pages host the detail page's own header (`ExperimentRecordHeader`) and tab components for the selected segment, wired once in `components/runs/useRunRecord.tsx`. Both are keyed on the segment ID so an open editor never carries a draft to another segment.
+- **Deleting a segment** trims it from the cached run before navigating (`trimDeletedSegment` in `components/runs/runWrites.ts`); a deleted ID is never invalidated while a page still reads it.
+- **Single-segment runs** show no picker and no Segments section.
+
+**Why:** after the #154 navigation sweep users still could not tell the segment page from the run page: the two showed different columns, charts and default tabs, and which one opened depended on what was clicked. A run with one segment had both pages for what the user sees as one experiment.
+
+**Open:** the Experiments list Description column minimum is 16rem, not the spec's first-draft 20rem (an implementation ruling, to confirm with Mat).
+
+## 2026-11-24 — Azure as built: region, tiers, networking, roles (#196)
+
+**Decision (Mat, building in the Azure portal, 2026-11-24):** the core resources exist and differ from the 2026-11-17 design in a few places. Recorded in the spec §7 (`docs/superpowers/specs/2026-11-17-azure-migration-design.md`); scripts and runbook now match.
+
+- **Region:** East US 2 for everything. East US refused PostgreSQL Flexible Server on the new subscription (a capacity restriction).
+- **Tiers and cost:** Postgres 18 Burstable B2s, 32 GiB Premium SSD (P4), HA off, about $53/month list. App Service Basic B1 on Linux/Python 3.13, about $12.41/month. Budget alert about $120/month. Premium SSD v2 is avoided because it hides the Burstable tier, and the wizard's General Purpose + HA default would have cost about $549/month.
+- **Backups:** 35-day retention; **geo-redundant backup off**. That is permanent, since it can only be set at creation. The off-Azure copy is the nightly lab PC dump to SharePoint. This reverses the spec's earlier "on".
+- **Networking:** public access through named firewall rules plus private endpoints (a creation-time mode; no endpoint yet). There is no "Allow Azure services" rule. Postgres sign-in accepts passwords and Entra (Entra admin Mat); every app role uses a password.
+- **Roles:** `experiments_app` owns the database and everything in it. `reporting_reader` is the read-only group, granted SELECT on tables and sequences through `ALTER DEFAULT PRIVILEGES FOR ROLE experiments_app`, because `event_listeners.py` rebuilds every `v_*` view at import and wipes plain grants. The backup login is **`lab_backup`**, a member of `reporting_reader`. It replaces the earlier `experiments_backup`, which had its own grants. The password admin is `addisadmin`, a member of `experiments_app` (PG 16+ needs that to assign the DB owner).
+- **Timezone:** server parameter `timezone = America/New_York`, plus `ALTER ROLE ... SET timezone` on `experiments_app` and `lab_backup`, plus app setting `TZ`. The locked parsers write naive datetimes, and UTC would store post-switch uploads a day early.
+- **App address:** "Secure unique default hostname" is on, so the default host has a random suffix (`addisenergy-lab-<random>.eastus2-01.azurewebsites.net`). The CNAME target and the Firebase authorized domain use that exact value.
+- **GitHub:** the repo moved to the Free `Addis-Energy` organization (2026-11-23) before any OIDC credential exists. The Team plan is only needed for protection rules or environments on a private repo.
+
+**Why:** these record a hand-built environment so a later rebuild, the rehearsal and the switch run against what actually exists, not against the first design.

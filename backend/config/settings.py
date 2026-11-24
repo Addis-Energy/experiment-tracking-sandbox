@@ -1,5 +1,6 @@
 from __future__ import annotations
 from functools import lru_cache
+from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,9 +24,16 @@ class Settings(BaseSettings):
 
     # File storage
     sample_photos_dir: str = "sample_photos"
+    photo_storage: Literal["local", "blob"] = "local"
+    azure_storage_account_url: str = ""
+    azure_photo_container: str = "sample-photos"
 
     # CORS
     cors_origins: str = "http://localhost:5173,http://localhost:8000"
+
+    # Interactive API docs (/docs, /redoc, /openapi.json). Off by default so a
+    # cloud deployment never exposes the API map; set ENABLE_API_DOCS=true in dev.
+    enable_api_docs: bool = False
 
     # ActLabs sample ID fuzzy matching threshold (0.0–1.0, default 0.90)
     actlabs_similarity_threshold: float = Field(default=0.90, ge=0.0, le=1.0)

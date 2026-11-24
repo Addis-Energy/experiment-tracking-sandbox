@@ -9,6 +9,8 @@ export type { NoteType } from './noteTypes'
 
 export interface ExperimentNote {
   id: number
+  /** The owning experiment's ID. Present on every note payload since issue #190. */
+  experiment_id?: string
   note_text: string
   note_type: NoteType
   /** Set when the note is about one timepoint (experimental_results.id). */
@@ -97,9 +99,15 @@ export interface ExperimentListItem {
   created_at: string
   experiment_type: string | null
   reactor_number: number | null
+  /** Slot label (R07 / P03 / CF02); null when the experiment holds no slot. */
+  reactor_slot?: string | null
   additives_summary: string | null
   /** The note typed 'description' (issue #118). */
   description: string | null
+  /** Issue #168: lab-local YYYY-MM-DD of the latest dated result; null when none.
+   *  A flat-mode vial row carries the latest over its vials. Render as is (no slicing).
+   *  Always sent by the API; optional so payloads built before #168 stay valid. */
+  last_result_date?: string | null
   base_experiment_id: string | null
   parent_experiment_fk: number | null
   replicate_label: string | null
@@ -256,8 +264,14 @@ export interface ExperimentListParams {
   sample_id?: string
   experiment_type?: string
   reactor_number?: number
+  /** A slot label ('P3', 'R03', 'CF1') or a plain number (any series). */
+  reactor?: string
+  /** Start date bounds, inclusive lab-local (America/New_York) YYYY-MM-DD. */
   date_from?: string
   date_to?: string
+  /** Issue #168: last result date bounds (latest scalar measurement date, lab-local), inclusive. */
+  last_result_from?: string
+  last_result_to?: string
   description?: string
   additive?: string
   /** Issue #152: true = backgrounds only, false = samples only. */
@@ -409,6 +423,14 @@ export interface CreateReplicatesResponse {
   skipped: string[]
 }
 
+/**
+ * Per-request timeout for the Excel exports, overriding the shared client's 30 s
+ * (issue #168). Building a workbook of every experiment measured ~3 s on the
+ * 2026-11-06 dump, so this leaves wide headroom for the lab PC and data growth
+ * while a stuck request still fails.
+ */
+export const EXPORT_TIMEOUT_MS = 120_000
+
 export const experimentsApi = {
   list: (params?: ExperimentListParams) =>
     apiClient.get<ExperimentListResponse>('/experiments', { params }).then((r) => r.data),
@@ -556,19 +578,23 @@ export const experimentsApi = {
   /**
    * Download the Export all workbook for an experiment's whole lineage (issue #141).
    * Fetched as a blob through apiClient so the Firebase token is attached.
-   * Resolves to the saved filename.
+   * Resolves to the saved filename; rejects with the server's `detail` text on failure.
    */
   exportAll: async (experimentId: string): Promise<string> => {
-    const response = await apiClient.get<Blob>(
-      `/experiments/${encodeURIComponent(experimentId)}/export`,
-      { responseType: 'blob' },
-    )
-    const filename = filenameFromDisposition(
-      response.headers['content-disposition'],
-      `${experimentId}_export.xlsx`,
-    )
-    saveBlob(response.data, filename)
-    return filename
+    try {
+      const response = await apiClient.get<Blob>(
+        `/experiments/${encodeURIComponent(experimentId)}/export`,
+        { responseType: 'blob', timeout: EXPORT_TIMEOUT_MS },
+      )
+      const filename = filenameFromDisposition(
+        response.headers['content-disposition'],
+        `${experimentId}_export.xlsx`,
+      )
+      saveBlob(response.data, filename)
+      return filename
+    } catch (err) {
+      throw new Error(await blobErrorMessage(err))
+    }
   },
 
   /**
@@ -580,7 +606,7 @@ export const experimentsApi = {
       const response = await apiClient.post<Blob>(
         '/experiments/export',
         { experiment_ids: experimentIds, include_series: includeSeries },
-        { responseType: 'blob' },
+        { responseType: 'blob', timeout: EXPORT_TIMEOUT_MS },
       )
       const filename = filenameFromDisposition(
         response.headers['content-disposition'],

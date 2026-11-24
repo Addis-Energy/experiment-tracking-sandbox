@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { SegmentLink } from '@/components/runs/SegmentLink'
 import { useQuery, useQueries } from '@tanstack/react-query'
 import {
   ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -8,7 +8,8 @@ import {
 import { experimentsApi } from '@/api/experiments'
 import type { H2BackgroundRollup, ResultWithFlags, RollupTimepoint } from '@/api/experiments'
 import { chartColors } from '@/assets/brand'
-import { Table, TableHead, TableBody, TableRow, Th, Td, Select, Spinner } from '@/components/ui'
+import { Table, TableHead, TableBody, TableRow, Th, Td, Select, Spinner, Num } from '@/components/ui'
+import { formatNumber, formatPrecise, fullValueTitle } from '@/utils/numberFormat'
 
 interface MetricDef {
   key: string
@@ -43,15 +44,17 @@ const NET_METRICS: MetricDef[] = [
     mean: 'mean_net_fe_yield_h2_pct', sd: 'sd_net_fe_yield_h2_pct', individual: () => null },
 ]
 
-const fmt = (v: number | null | undefined, digits = 2) =>
-  v == null ? '—' : v.toFixed(digits)
+const fmt = formatNumber
 
 /** `mean ± sd`, or the mean alone when the bucket held one vial. A NULL sd used
  *  to be coerced to 0 and rendered as "± 0.0", which claims a measured spread of
- *  zero where none was computed at all (issue #101). */
-const fmtMeanSd = (
-  mean: number | null | undefined, sd: number | null | undefined, digits = 2,
-) => (mean == null ? '—' : sd == null ? fmt(mean, digits) : `${fmt(mean, digits)} ± ${fmt(sd, digits)}`)
+ *  zero where none was computed at all (issue #101). Mean and sd show full
+ *  precision on hover. */
+function fmtMeanSd(mean: number | null | undefined, sd: number | null | undefined) {
+  if (mean == null) return '—'
+  const title = sd == null ? fullValueTitle(mean) : `${fullValueTitle(mean)} ± ${fullValueTitle(sd)}`
+  return <span title={title}>{sd == null ? fmt(mean) : `${fmt(mean)} ± ${fmt(sd)}`}</span>
+}
 
 interface GroupedResultsViewProps {
   baseExperimentId: string
@@ -60,7 +63,8 @@ interface GroupedResultsViewProps {
 /** Base-level grouped results: mean ± std per timepoint from the rollup view,
  *  with individual replicate series overlay and drill-in links. */
 export function GroupedResultsView({ baseExperimentId }: GroupedResultsViewProps) {
-  const [metricKey, setMetricKey] = useState('h2_ppm')
+  // null until the user picks one: then the default below applies (issue #160).
+  const [metricKey, setMetricKey] = useState<string | null>(null)
   const [showIndividual, setShowIndividual] = useState(true)
 
   // NEW query keys — these hit the /experiments/groups/{base_id}[/rollup] endpoints,
@@ -76,8 +80,6 @@ export function GroupedResultsView({ baseExperimentId }: GroupedResultsViewProps
     () => (hasBackground ? [...METRICS, ...NET_METRICS] : METRICS),
     [hasBackground],
   )
-  // If the link is cleared while a net metric is selected, fall back to H2 (ppm).
-  const metric = metrics.find((m) => m.key === metricKey) ?? METRICS[0]
 
   const { data: bkgRollup } = useQuery({
     queryKey: ['group-h2-bkg-rollup', baseExperimentId],
@@ -101,6 +103,14 @@ export function GroupedResultsView({ baseExperimentId }: GroupedResultsViewProps
     queryKey: ['group-rollup', baseExperimentId],
     queryFn: () => experimentsApi.getGroupRollup(baseExperimentId),
   })
+
+  // Issue #160: open on H2 (g/t), the unit every run list and results table
+  // headlines. A group with no rock mass (a background set, #151/#152) has no
+  // g/t at all, so it opens on H2 (ppm) rather than on an empty chart.
+  const hasGpt = (rollup ?? []).some((r) => r.mean_h2_grams_per_ton != null)
+  const defaultKey = hasGpt ? 'h2_gpt' : 'h2_ppm'
+  // If the link is cleared while a net metric is selected, fall back to H2 (ppm).
+  const metric = metrics.find((m) => m.key === (metricKey ?? defaultKey)) ?? METRICS[0]
 
   // Issue #98: one series per REPLICATE LETTER, not per vial. A letter
   // sacrificed across timepoints is several rows whose single result each form
@@ -253,14 +263,10 @@ export function GroupedResultsView({ baseExperimentId }: GroupedResultsViewProps
         </label>
         <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-ink-secondary pb-2">
           {drillInVials.map((vial) => (
-            <Link
-              key={vial.id}
-              to={`/experiments/${vial.experiment_id}`}
-              className={`font-mono-data ${vial.is_outlier ? 'text-ink-muted line-through hover:text-ink-secondary' : 'text-red-400 hover:text-red-300'}`}
-            >
+            <SegmentLink key={vial.id} id={vial.experiment_id} outlier={vial.is_outlier}>
               {vial.experiment_id}
               {vial.is_outlier ? ' (outlier)' : ''}
-            </Link>
+            </SegmentLink>
           ))}
         </div>
       </div>
@@ -268,7 +274,7 @@ export function GroupedResultsView({ baseExperimentId }: GroupedResultsViewProps
       {/* Chart — single y-axis; mean emphasized, members thin; legend always on */}
       <div className="h-72 w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>
+          <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 24, left: 0 }}>
             <CartesianGrid stroke={chartColors.grid} strokeDasharray="3 3" />
             <XAxis
               dataKey="bucket" type="number" domain={['dataMin', 'dataMax']}
@@ -283,7 +289,9 @@ export function GroupedResultsView({ baseExperimentId }: GroupedResultsViewProps
               contentStyle={{ backgroundColor: chartColors.tooltipBg, border: `1px solid ${chartColors.grid}`, fontSize: 12 }}
               labelFormatter={(v) => `Day ${v}`}
             />
-            <Legend wrapperStyle={{ fontSize: 11, color: chartColors.label }} />
+            {/* Above the plot, as in IcpChart: at the bottom it printed over the
+                x-axis title (issue #160). */}
+            <Legend verticalAlign="top" wrapperStyle={{ fontSize: 11, color: chartColors.label }} />
             {showIndividual && metric.source !== 'bkg' &&
               seriesLetters.map((letter, i) => (
                 <Line
@@ -334,21 +342,21 @@ export function GroupedResultsView({ baseExperimentId }: GroupedResultsViewProps
         <TableBody>
           {rollup.map((r) => (
             <TableRow key={`${r.base_experiment_id}-${r.time_post_reaction_bucket_days}`}>
-              <Td className="font-mono-data">{fmt(r.time_post_reaction_bucket_days, 1)}</Td>
+              <Td className="font-mono-data">{formatPrecise(r.time_post_reaction_bucket_days)}</Td>
               <Td className="font-mono-data text-ink-muted">n = {r.n_vials}</Td>
               <Td className="font-mono-data">
-                {fmtMeanSd(r.mean_h2_ppm, r.sd_h2_ppm, 1)}
+                {fmtMeanSd(r.mean_h2_ppm, r.sd_h2_ppm)}
               </Td>
               <Td className="font-mono-data">
-                {fmtMeanSd(r.mean_h2_micromoles, r.sd_h2_micromoles, 1)}
+                {fmtMeanSd(r.mean_h2_micromoles, r.sd_h2_micromoles)}
               </Td>
               <Td className="font-mono-data">
-                {fmtMeanSd(r.mean_h2_grams_per_ton, r.sd_h2_grams_per_ton, 1)}
+                {fmtMeanSd(r.mean_h2_grams_per_ton, r.sd_h2_grams_per_ton)}
               </Td>
               <Td className="font-mono-data">
                 {fmtMeanSd(r.mean_fe_yield_h2_pct, r.sd_fe_yield_h2_pct)}
               </Td>
-              <Td className="font-mono-data">{fmt(r.mean_final_ph)}</Td>
+              <Td className="font-mono-data"><Num value={r.mean_final_ph} /></Td>
               {hasBackground && <NetCells bkg={bkgByBucket.get(r.time_post_reaction_bucket_days!)} />}
             </TableRow>
           ))}
@@ -363,10 +371,10 @@ function NetCells({ bkg }: { bkg: H2BackgroundRollup | undefined }) {
   return (
     <>
       <Td className="font-mono-data">
-        {fmtMeanSd(bkg?.mean_net_h2_micromoles, bkg?.sd_net_h2_micromoles, 1)}
+        {fmtMeanSd(bkg?.mean_net_h2_micromoles, bkg?.sd_net_h2_micromoles)}
       </Td>
       <Td className="font-mono-data">
-        {fmtMeanSd(bkg?.mean_net_h2_grams_per_ton, bkg?.sd_net_h2_grams_per_ton, 1)}
+        {fmtMeanSd(bkg?.mean_net_h2_grams_per_ton, bkg?.sd_net_h2_grams_per_ton)}
       </Td>
       <Td className="font-mono-data">
         {fmtMeanSd(bkg?.mean_net_fe_yield_h2_pct, bkg?.sd_net_fe_yield_h2_pct)}

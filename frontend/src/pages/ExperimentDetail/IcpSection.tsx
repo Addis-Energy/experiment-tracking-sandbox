@@ -1,17 +1,27 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { experimentsApi } from '@/api/experiments'
+import type { ExperimentIcp } from '@/api/icp'
 import { IcpChart } from '@/components/icp/IcpChart'
+import { Collapsible } from '@/components/runs/Collapsible'
 
-interface Props { experimentId: string }
+interface Props {
+  experimentId: string
+  /** The series ICP when the caller already has it (the Results tab reads it for
+   *  the table's ICP flags, issue #163); otherwise this section fetches it. */
+  icp?: ExperimentIcp
+}
 
 /** ICP over time for the experiment's whole series (issue #143); hidden when
- *  the series has no ICP readings. Shares IcpChart with the core flood run page. */
-export function IcpSection({ experimentId }: Props) {
-  const { data } = useQuery({
+ *  the series has no ICP readings. Shares IcpChart with the run pages and, like
+ *  them, opens expanded with the sample count in the header. */
+export function IcpSection({ experimentId, icp }: Props) {
+  const { data: fetched } = useQuery({
     queryKey: ['experiment-icp', experimentId],
     queryFn: () => experimentsApi.getIcp(experimentId),
+    enabled: icp === undefined,
   })
+  const data = icp ?? fetched
   const markers = useMemo(
     () => (data?.segment_starts ?? []).map((s) => ({ day: s.day, experimentId: s.experiment_id })),
     [data],
@@ -19,16 +29,14 @@ export function IcpSection({ experimentId }: Props) {
   if (!data || data.rows.length === 0) return null
 
   const experiments = new Set(data.rows.map((r) => r.experiment_id)).size
+  const summary =
+    `${data.rows.length} ${data.rows.length === 1 ? 'sample' : 'samples'} · ` +
+    `${experiments} ${experiments === 1 ? 'experiment' : 'experiments'} in series`
   return (
-    <section className="p-4 border-t border-surface-border space-y-3">
-      <div className="flex items-baseline gap-3">
-        <h3 className="text-xs font-semibold text-ink-secondary uppercase tracking-wider">ICP over time</h3>
-        <span className="text-xs text-ink-muted">
-          {data.rows.length} {data.rows.length === 1 ? 'sample' : 'samples'} · {experiments}{' '}
-          {experiments === 1 ? 'experiment' : 'experiments'} in series
-        </span>
-      </div>
-      <IcpChart rows={data.rows} markers={markers} />
-    </section>
+    <div className="p-4 border-t border-surface-border">
+      <Collapsible title="ICP over time" summary={summary} defaultOpen>
+        <IcpChart rows={data.rows} markers={markers} />
+      </Collapsible>
+    </div>
   )
 }

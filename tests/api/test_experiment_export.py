@@ -19,6 +19,9 @@ from database.models.conditions import ExperimentalConditions
 from database.models.enums import AmountUnit, ExperimentStatus, NoteType
 from database.models.experiments import ExperimentNotes
 from database.models.results import ICPResults
+from database.models.analysis import ExternalAnalysis
+from database.models.samples import SampleInfo
+from database.models.xrd import XRDPhase
 
 # 23:30 lab time on 2026-11-06 is already 2026-11-07 in UTC.
 _FROZEN_NOW = datetime(2026, 11, 6, 23, 30, tzinfo=LAB_TZ)
@@ -44,14 +47,16 @@ _NUM = iter(range(98500, 99000))
 
 
 def _experiment(db, exp_id, *, date_=None, status=ExperimentStatus.COMPLETED,
-                experiment_type="Core Flood", description=None):
+                experiment_type="Core Flood", description=None,
+                reactor_number=3, reactor_series=None):
     exp = Experiment(experiment_id=exp_id, experiment_number=next(_NUM),
                      status=status, date=date_)
     db.add(exp)
     db.flush()
     db.add(ExperimentalConditions(
         experiment_fk=exp.id, experiment_id=exp.experiment_id,
-        experiment_type=experiment_type, reactor_number=3, pore_volume_mL=20.0,
+        experiment_type=experiment_type, reactor_number=reactor_number,
+        reactor_series=reactor_series, pore_volume_mL=20.0,
         rock_mass_g=50.0, temperature_c=90.0,
     ))
     if description:
@@ -489,15 +494,53 @@ def test_selection_unknown_ids_422(client, db_session, reporting_views):
     assert resp.json()["detail"] == "Unknown experiment IDs: NOPE_1, NOPE_2"
 
 
-def test_selection_cap_422(client, db_session, reporting_views, monkeypatch):
-    monkeypatch.setattr(experiment_export, "EXPORT_MAX_EXPERIMENTS", 2)
+def test_selection_over_500_after_expansion_exports(
+        client, db_session, reporting_views):
+    """#168: the old 500-experiment cap is gone; one pick expands to 501 vials."""
+    db_session.add_all([
+        Experiment(experiment_id=f"SERUM_BIG_001-t{i}", experiment_number=90000 + i,
+                   status=ExperimentStatus.COMPLETED)
+        for i in range(1, 502)])
+    db_session.flush()
+    _resp, wb = _post(client, ["SERUM_BIG_001-t1"], include_series=False)
+    _h, exps = _table(wb["Experiments"])
+    assert len(exps) == 501
+    summary = _summary(wb)
+    assert summary["Experiment count"] == 501
+    for ws in wb.worksheets:
+        if ws.title != "Summary":
+            assert summary[f"Rows: {ws.title}"] == ws.max_row - 1
+
+
+def test_selection_tab_over_sheet_row_limit_422(
+        client, db_session, reporting_views, monkeypatch):
+    # Header + 2 data rows; _seed_run gives Results 4 rows (Experiments only 3).
+    monkeypatch.setattr(experiment_export, "EXCEL_MAX_ROWS", 3)
     _seed_run(db_session)
     resp = client.post("/api/experiments/export", json={
         "experiment_ids": ["CFE_001"]})
     assert resp.status_code == 422
     assert resp.json()["detail"] == (
-        "Export too large: 3 experiments after expansion (limit 2). "
-        "Narrow the selection or turn off Include whole series.")
+        "Export too large: the Experiments tab has 3 rows and an Excel sheet "
+        "holds at most 2. Narrow the selection.")
+
+
+def test_lineage_tab_over_sheet_row_limit_422(
+        client, db_session, reporting_views, monkeypatch):
+    monkeypatch.setattr(experiment_export, "EXCEL_MAX_ROWS", 4)
+    _seed_run(db_session)
+    resp = client.get("/api/experiments/CFE_001/export")
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == (
+        "Export too large: the Results tab has 4 rows and an Excel sheet "
+        "holds at most 3. Narrow the selection.")
+
+
+def test_tab_at_sheet_row_limit_exports(
+        client, db_session, reporting_views, monkeypatch):
+    monkeypatch.setattr(experiment_export, "EXCEL_MAX_ROWS", 5)  # header + 4
+    _seed_run(db_session)
+    _get(client, "CFE_001")
 
 
 def test_selection_empty_list_422(client, db_session, reporting_views):
@@ -553,3 +596,224 @@ def test_selection_more_than_500_ids_gets_string_detail(
     detail = resp.json()["detail"]
     assert isinstance(detail, str)
     assert detail.startswith("Unknown experiment IDs: ")
+
+
+# ---------------------------------------------------------------------------
+# XRD tabs: post-reaction XRD (v_experiment_xrd) and starting-rock XRD
+# (v_sample_xrd), one wide row per timepoint / analysis.
+# ---------------------------------------------------------------------------
+
+def _xrd(db, exp, day, phases, *, rwp, measured):
+    for mineral, amount in phases.items():
+        db.add(XRDPhase(experiment_fk=exp.id, experiment_id=exp.experiment_id,
+                        time_post_reaction_days=day, mineral_name=mineral,
+                        amount=amount, rwp=rwp, measurement_date=measured))
+    db.flush()
+
+
+def _rock_xrd(db, sample_id, phases, *, analysis_date=None, lab="ActLabs",
+              analyst="J. Doe"):
+    if db.get(SampleInfo, sample_id) is None:
+        db.add(SampleInfo(sample_id=sample_id))
+        db.flush()
+    ea = ExternalAnalysis(sample_id=sample_id, analysis_type="XRD",
+                          analysis_date=analysis_date, laboratory=lab, analyst=analyst)
+    db.add(ea)
+    db.flush()
+    for mineral, amount in phases.items():
+        db.add(XRDPhase(sample_id=sample_id, external_analysis_id=ea.id,
+                        mineral_name=mineral, amount=amount))
+    db.flush()
+
+
+def _seed_run_with_xrd(db):
+    root, seg2, bypass = _seed_run(db)
+    _xrd(db, root, 0, {"Forsterite": 60.0, "Lizardite": 30.0},
+         rwp=2.5, measured=_lab(2026, 10, 1))
+    _xrd(db, seg2, 10, {"Forsterite": 52.0, "Magnetite": 4.0, "Lizardite": 33.0},
+         rwp=3.1, measured=_lab(2026, 10, 11))
+    _rock_xrd(db, "CFE_ROCK_1", {"Forsterite": 61.9, "Amphibole": 6.3},
+              analysis_date=_lab(2026, 9, 1))
+    root.sample_id = "CFE_ROCK_1"
+    seg2.sample_id = "CFE_ROCK_1"
+    db.flush()
+    return root, seg2, bypass
+
+
+def test_xrd_tabs_follow_core_flood(client, db_session, reporting_views):
+    _seed_run_with_xrd(db_session)
+    _resp, wb = _get(client, "CFE_001")
+    assert wb.sheetnames == ["Results", "Core Flood", "XRD", "Rock XRD", "Conditions",
+                             "Additives", "Notes", "Summary"]
+    summary = _summary(wb)
+    assert summary["Rows: XRD"] == 2
+    assert summary["Rows: Rock XRD"] == 1
+
+
+def test_xrd_tab_is_wide_and_matches_view(client, db_session, reporting_views):
+    _seed_run_with_xrd(db_session)
+    _resp, wb = _get(client, "CFE_001-2")
+    headers, rows = _table(wb["XRD"])
+    # Minerals present anywhere in the export, alphabetical, after the fixed columns.
+    assert headers == ["Experiment ID", "is_variant", "Day", "Measurement date", "Rwp",
+                       "Forsterite (%)", "Lizardite (%)", "Magnetite (%)"]
+    assert [(r["Experiment ID"], r["Day"]) for r in rows] == [
+        ("CFE_001", 0), ("CFE_001-2", 10)]
+    view = {(v["experiment_id"], v["mineral_name"]): v for v in _view(
+        db_session, "SELECT * FROM v_experiment_xrd"
+                    " WHERE experiment_id IN ('CFE_001', 'CFE_001-2')")}
+    seg = rows[1]
+    assert seg["is_variant"] is False
+    assert seg["Forsterite (%)"] == view[("CFE_001-2", "Forsterite")]["amount_pct"] == 52.0
+    assert seg["Magnetite (%)"] == 4.0
+    assert seg["Rwp"] == pytest.approx(3.1)
+    assert seg["Measurement date"] == _naive_lab(view[("CFE_001-2", "Magnetite")]
+                                                 ["measurement_date"])
+    # A mineral not measured at a timepoint is blank, not 0.
+    assert rows[0]["Magnetite (%)"] is None
+
+
+def test_rock_xrd_tab_names_the_experiments_using_the_sample(
+        client, db_session, reporting_views):
+    _seed_run_with_xrd(db_session)
+    _resp, wb = _get(client, "CFE_001")
+    headers, rows = _table(wb["Rock XRD"])
+    assert headers == ["Sample ID", "Used by", "Analysis date", "Laboratory", "Analyst",
+                       "Amphibole (%)", "Forsterite (%)"]
+    assert len(rows) == 1
+    assert rows[0]["Sample ID"] == "CFE_ROCK_1"
+    assert rows[0]["Used by"] == "CFE_001, CFE_001-2"
+    assert rows[0]["Analysis date"] == datetime(2026, 9, 1)
+    assert rows[0]["Laboratory"] == "ActLabs"
+    assert rows[0]["Forsterite (%)"] == 61.9
+    assert rows[0]["Amphibole (%)"] == 6.3
+
+
+def test_post_reaction_xrd_never_counts_as_rock_xrd(
+        client, db_session, reporting_views):
+    """An experiment's own XRD stays off Rock XRD even when it has a sample ID."""
+    exp = _experiment(db_session, "HPE_020", experiment_type="HPHT")
+    db_session.add(SampleInfo(sample_id="HPE_ROCK_2"))
+    db_session.flush()
+    exp.sample_id = "HPE_ROCK_2"
+    _xrd(db_session, exp, 7, {"Talc": 12.0}, rwp=4.0, measured=_lab(2026, 10, 8))
+    _resp, wb = _get(client, "HPE_020")
+    assert wb.sheetnames == ["Results", "XRD", "Conditions", "Additives", "Notes",
+                             "Summary"]
+
+
+def test_selection_includes_xrd_tabs(client, db_session, reporting_views):
+    _seed_run_with_xrd(db_session)
+    hp = _experiment(db_session, "HPE_010", experiment_type="HPHT")
+    _sample(db_session, hp, 2.0)
+    _rock_xrd(db_session, "HPE_ROCK_1", {"Quartz": 90.0})
+    hp.sample_id = "HPE_ROCK_1"
+    db_session.flush()
+    _resp, wb = _post(client, ["CFE_001", "HPE_010"])
+    assert wb.sheetnames == ["Experiments", "Results", "Core Flood", "XRD", "Rock XRD",
+                             "Conditions", "Additives", "Notes", "Summary"]
+    _h, rock = _table(wb["Rock XRD"])
+    # Member order: the CFE series first, then HPE_010.
+    assert [(r["Sample ID"], r["Used by"]) for r in rock] == [
+        ("CFE_ROCK_1", "CFE_001, CFE_001-2"), ("HPE_ROCK_1", "HPE_010")]
+    assert rock[0]["Quartz (%)"] is None
+    assert rock[1]["Quartz (%)"] == 90.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #168 Part 1 audit: the confirmed defects B5 (Core Flood row order)
+# and B6 (text written as a formula).
+# ---------------------------------------------------------------------------
+
+
+def test_selection_core_flood_rows_grouped_by_series(
+        client, db_session, reporting_views):
+    _seed_run(db_session)  # CFE_001 samples at days 1 and 4, CFE_001-2 at 10
+    other = _experiment(db_session, "CFF_001", date_=_lab(2026, 9, 1, 9))
+    _sample(db_session, other, 2.0, measured=_lab(2026, 9, 3))
+    _sample(db_session, other, 5.0, measured=_lab(2026, 9, 6))
+    _resp, wb = _post(client, ["CFE_001", "CFF_001"])
+    _h, cf = _table(wb["Core Flood"])
+    series = [r["Experiment ID"].split("-")[0].split("_Bypass")[0] for r in cf]
+    # Each series' rows are contiguous, in the Experiments tab's series order.
+    assert series == sorted(series, key=["CFE_001", "CFF_001"].index)
+
+
+@pytest.mark.parametrize("text_", ["=see above", "+10 mL pH4", "-2 mL", "@lab"])
+def test_note_starting_with_formula_char_is_text(
+        client, db_session, reporting_views, text_):
+    root, _seg2, _bypass = _seed_run(db_session)
+    db_session.add(ExperimentNotes(experiment_fk=root.id,
+                                   experiment_id=root.experiment_id,
+                                   note_type=NoteType.modification,
+                                   event_date=date(2026, 10, 3),
+                                   note_text=text_))
+    db_session.flush()
+    _resp, wb = _get(client, "CFE_001")
+    ws = wb["Notes"]
+    headers = [c.value for c in ws[1]]
+    col = headers.index("Text")
+    cells = [row[col] for row in ws.iter_rows(min_row=2) if row[col].value == text_]
+    assert len(cells) == 1
+    assert cells[0].data_type == "s"
+    # quotePrefix keeps Excel from re-reading it as a formula when edited.
+    assert cells[0].quotePrefix is True
+
+
+def test_formula_guard_leaves_numbers_and_plain_text(
+        client, db_session, reporting_views):
+    _seed_run(db_session)
+    _resp, wb = _get(client, "CFE_001")
+    _h, notes = _table(wb["Notes"])
+    assert {r["Text"] for r in notes} >= {"cloudy", "swapped pump"}
+    ws = wb["Notes"]
+    assert not any(c.quotePrefix for row in ws.iter_rows(min_row=2) for c in row)
+    _h, res = _table(wb["Results"])
+    assert all(isinstance(r["pH"], (int, float)) for r in res)
+
+
+def test_experiments_tab_header_is_start_date(client, db_session, reporting_views):
+    """#168: the start date is labeled as such (the source key stays `date`)."""
+    root, _seg2, _bypass = _seed_run(db_session)
+    _resp, wb = _post(client, ["CFE_001"])
+    headers, exps = _table(wb["Experiments"])
+    assert "Start date" in headers and "Date" not in headers
+    by_id = {r["Experiment ID"]: r for r in exps}
+    assert by_id["CFE_001"]["Start date"] == _naive_lab(root.date)
+
+
+# --- Reactor label (reactor-labels, 2026-11-16) ------------------------------
+
+_REACTOR_IDS = ["RXE_P", "RXE_R", "RXE_CF", "RXE_AUTO", "RXE_NONE"]
+_REACTOR_EXPECTED = {"RXE_P": "P03", "RXE_R": "R03", "RXE_CF": "CF03",
+                     "RXE_AUTO": "3", "RXE_NONE": None}
+
+
+def _seed_reactors(db):
+    _experiment(db, "RXE_P", experiment_type="HPHT", reactor_series="P")
+    _experiment(db, "RXE_R", experiment_type="HPHT")
+    _experiment(db, "RXE_CF", experiment_type="Core Flood")
+    _experiment(db, "RXE_AUTO", experiment_type="Autoclave")
+    _experiment(db, "RXE_NONE", experiment_type="HPHT", reactor_number=None)
+
+
+def _reactor_column(ws):
+    headers, rows = _table(ws)
+    assert headers.count("Reactor") == 1
+    assert "Reactor number" not in headers
+    return {r["Experiment ID"]: r["Reactor"] for r in rows}
+
+
+def test_selection_export_shows_reactor_label_on_both_tabs(
+        client, db_session, reporting_views):
+    _seed_reactors(db_session)
+    _resp, wb = _post(client, _REACTOR_IDS, include_series=False)
+    assert _reactor_column(wb["Experiments"]) == _REACTOR_EXPECTED
+    assert _reactor_column(wb["Conditions"]) == _REACTOR_EXPECTED
+
+
+@pytest.mark.parametrize("exp_id", _REACTOR_IDS)
+def test_series_export_shows_reactor_label(client, db_session, reporting_views, exp_id):
+    _seed_reactors(db_session)
+    _resp, wb = _get(client, exp_id)
+    assert _reactor_column(wb["Conditions"]) == {exp_id: _REACTOR_EXPECTED[exp_id]}

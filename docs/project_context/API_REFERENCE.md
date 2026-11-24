@@ -7,12 +7,12 @@ Auth: All endpoints require `Authorization: Bearer <firebase-id-token>` header.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/experiments` | List experiments. Query: `skip`, `limit`, `status`, `experiment_type`, `sample_id`, `researcher`, `search` (case-insensitive partial match on `experiment_id`), `reactor_number`, `date_from`, `date_to`, `description` (matches the experiment's first note / Description column), `additive` (case-insensitive partial match on the compound name of any of the experiment's chemical additives), `is_background` (bool, issue #152: `true` = backgrounds only, `false` = samples only, omitted = both), `group_replicates` (bool, default false). `experiment_type`, `reactor_number`, `description`, and `additive` are applied in SQL before `skip`/`limit`, so `total` and the returned page always reflect the fully-filtered set (#64). |
+| GET | `/api/experiments` | List experiments. Query: `skip`, `limit`, `status`, `experiment_type`, `sample_id`, `researcher`, `search` (case-insensitive partial match on `experiment_id`), `reactor_number` (integer; any series), `reactor` (text, added 2026-11-16: a slot label such as `P3`, `R03` or `CF1` matches that exact `reactor_slot`; a plain number matches `reactor_number` in any series, including a legacy row with no slot; blank is no filter; anything else, including `0`, is `422` with `Unknown reactor '<value>'; ...`), `date_from`, `date_to` (start date, `YYYY-MM-DD`, inclusive lab-local calendar dates since issue #168: a run started at 14:00 ET on `date_to` is included; an invalid date is a 422), `last_result_from`, `last_result_to` (issue #168: the experiment's last result date, see `last_result_date` below; inclusive, `YYYY-MM-DD`, validated; setting either drops experiments with no dated result), `description` (matches the experiment's first note / Description column), `additive` (case-insensitive partial match on the compound name of any of the experiment's chemical additives), `is_background` (bool, issue #152: `true` = backgrounds only, `false` = samples only, omitted = both), `group_replicates` (bool, default false). `experiment_type`, `reactor_number`, `description`, `additive` and both date pairs are applied in SQL before `skip`/`limit`, so `total` and the returned page always reflect the fully-filtered set (#64). |
 | GET | `/api/experiments/next-id` | Next auto-incremented experiment ID. Query: `type` (Serum/HPHT/Autoclave/Core Flood). Returns `{"next_id": "HPHT_004"}` |
 | GET | `/api/experiments/{experiment_id}/exists` | Check if experiment ID string is already in use |
 | GET | `/api/experiments/{experiment_id}/export` | **Export all** (issue #141): one `.xlsx` for the experiment's whole lineage. See below. |
 | POST | `/api/experiments/export` | **Data Export** (issue #142): one `.xlsx` for a picked list of experiments. See below. |
-| GET | `/api/experiments/{experiment_id}` | Get single experiment with conditions, notes, and modifications |
+| GET | `/api/experiments/{experiment_id}` | Get single experiment with conditions, notes, and modifications. `notes` are `NoteResponse` rows (each carries `experiment_id` since issue #190); `modifications` are `ModificationResponse` rows |
 | GET | `/api/experiments/{experiment_id}/results` | List result timepoints with scalar/ICP existence flags, `has_modification_note` (EXISTS over the result's `modification` notes) and `notes` (every typed note scoped to the result). `has_brine_modification` was removed in #118 PR3. Rows include `sample_tube_number` (read-only, issue #146). |
 | POST | `/api/experiments/{experiment_id}/results` | **Hand entry** (issue #146): add one sample (result + scalar rows, notes) atomically to a non-Core-Flood experiment. 201. See below. |
 | PATCH | `/api/experiments/{experiment_id}/results/{result_id}` | **Hand edit** (issue #146): audited partial edit of one primary sample. See below. |
@@ -71,12 +71,21 @@ When `group_replicates=true`, pagination runs over **top-level rows** instead of
   ID. Grouped mode: the group stem (`SERUM_001`). Flat mode: the
   timepoint-stripped stem (`SERUM_001a`). `experiment_id` continues to name the
   real representative row, which is the earliest non-outlier vial and also
-  supplies `sample_id`, `reactor_number`, `date`, `description` and
+  supplies `sample_id`, `reactor_number`, `reactor_slot`, `date`, `description` and
   `additives_summary`.
 - `vial_count` (integer, default 1) — how many experiment rows this row stands
   for. Flat mode counts matched rows sharing the stem; grouped mode counts every
   row in the bucket, parent included. A row with `vial_count > 1` must not offer
   an inline status edit — the PATCH would reach only the representative.
+- `last_result_date` (date `YYYY-MM-DD`, nullable; issue #168) — the
+  America/New_York calendar date of `MAX(scalar_results.measurement_date)`
+  over the experiment's own results; null when none is dated. No fallback to
+  start date + days, and ICP `sample_date` is not counted (on the 2026-11-06
+  dump that changed no experiment). The same expression (`_last_result_date_expr`)
+  drives the `last_result_from`/`last_result_to` filter, which tests each
+  experiment row. Flat mode: the latest over the vials the row stands for (those
+  that passed the filters, as `vial_count`), since picking the row exports all of
+  them (Mat, 2026-11-11). Grouped mode, by the same rule: a group row carries the latest over its whole bucket (unfiltered, like its `vial_count`), and each `replicates` child the latest over its own vials (`_latest_last_result_date`).
 - `replicate_letters` (array of string, nullable) — grouped mode only: the
   group's DISTINCT replicate letters, for the "N replicates: a, b" badge. Null
   in flat mode and for rows that are not groups.
@@ -404,12 +413,14 @@ Read-only, no new formulas: every value comes from the reporting views Power BI
 reads. Service: `backend/services/experiment_export.py`.
 
 - **Filename:** `Content-Disposition: attachment; filename="<base_id>_export_<YYYY-MM-DD>.xlsx"`, lab-local (America/New_York) date.
-- **Errors:** `404` if the experiment does not exist.
+- **Errors:** `404` if the experiment does not exist. `422` (`detail` is the message) if a tab would exceed Excel's sheet limit (see the size limit under `POST /api/experiments/export`).
 
 | Tab | Rows | Source |
 |-----|------|--------|
 | Results | one per primary timepoint, all lineage members | `v_results_scalar` left-joined on `result_id` to `v_results_h2`, `v_results_icp` and `v_dim_timepoints` (tube number, modification note). Adds `is_variant` (same rule as `v_core_flood_samples`). Ordered by member, then cumulative day. |
-| Core Flood | one per sample; **only when a member is a Core Flood experiment** | `v_core_flood_samples` (flow, hold flag, permeability test flow, pressures, interval, cumulative liquid volume / pore volumes / H₂, H₂ rate) |
+| Core Flood | one per sample; **only when a member is a Core Flood experiment** | `v_core_flood_samples` (flow, hold flag, permeability test flow, pressures, interval, cumulative liquid volume / pore volumes / H₂, H₂ rate). Ordered by series (member order), then segments before side samples, then cumulative day (issue #168; before, a multi-series selection interleaved its series). |
+| XRD | one per member × post-reaction day; **only when a member has experiment-linked XRD** | `v_experiment_xrd`, pivoted wide: Experiment ID, `is_variant`, Day, Measurement date, Rwp, then one `<mineral> (%)` column per mineral in the export (alphabetical, case-insensitive; names kept exactly as stored, so `Ilmenite` and `ilmenite` are two columns). A mineral not measured at that day is blank. Ordered by member, then day. |
+| Rock XRD | one per XRD analysis of a member's starting-rock sample; **only when one exists** | `v_sample_xrd` for the members' `sample_id` (from `v_experiments`), pivoted wide: Sample ID, Used by (the exported members with that sample, member order), Analysis date, Laboratory, Analyst, then `<mineral> (%)` columns as on XRD. Ordered by the sample's first user, then analysis date. |
 | Conditions | one per member | `v_experiment_conditions` |
 | Additives | one per member × compound | `v_chemical_additives` |
 | Notes | one per note | `v_notes` (type, event date, result ID, text, author, created at, needs review) |
@@ -422,6 +433,9 @@ time (a column whose every value is lab midnight is formatted `yyyy-mm-dd`, othe
 reading in the export, in `ICP_ELEMENTS` order. **S is never exported**:
 `v_results_icp` has no `s_ppm` column (known view gap, noted 2026-08-13).
 An experiment with no results still exports; its Results tab keeps the header row.
+Text starting with `=`, `+`, `-` or `@` (a note such as "+10 mL pH4") is written as a
+text cell with Excel's quote prefix, never as a formula (issue #168), so the workbook
+opens without a repair prompt and editing the cell does not turn it into one.
 
 ### POST /api/experiments/export
 
@@ -435,26 +449,38 @@ Declared before `/{experiment_id}/export`, so `export` is never read as an exper
 { "experiment_ids": ["CF_027", "SERUM_X_001-t1"], "include_series": true }
 ```
 
-`experiment_ids`: at least 1 string (duplicates are ignored; the only size limit is the 500-experiment cap below). `include_series`: boolean, default `true`.
+`experiment_ids`: at least 1 string (duplicates are ignored; no count limit). `include_series`: boolean, default `true`.
 
 **Expansion rules** (`resolve_selection`):
 - A picked ID always brings every vial of its timepoint stem (`SERUM_X_001-t1` also brings `-t3`, `-t7`).
 - With `include_series` true, it also brings every experiment sharing the `base_experiment_id` of any of those (the whole lineage, replicate set and side samples).
 - Members are ordered series by series (`_series_order`): series by base ID; within a series by experiment date (undated last), then timepoint stem, then `-t` day ascending (numeric, so `-t3` precedes `-t20`). Every tab follows this member order. Side samples are flagged `is_variant`.
-- At most **500** experiments after expansion (`EXPORT_MAX_EXPERIMENTS`).
+
+**Size limit (issue #168).** There is no experiment cap; the 500-experiment cap after
+expansion (`EXPORT_MAX_EXPERIMENTS`) was removed, since a full Data Export page with
+Include whole series on routinely expanded past it. The only limit is the file
+format's: a tab may hold at most 1,048,575 data rows (`EXCEL_MAX_ROWS` = 1,048,576
+including the header), checked on every tab of both exports before anything is
+written. Measured on the 2026-11-06 production dump (dev PC): 500 newest picks
+→ 527 experiments (series off) / 534 (series on), ~0.6 s, 0.2 MB; every experiment
+(2,262) → ~3 s, 1.05 MB, 241 MB peak process memory, largest tab Notes at 5,723 rows.
+The frontend gives both export requests a 120 s timeout (`EXPORT_TIMEOUT_MS`) instead
+of the shared client's 30 s.
 
 - **Filename:** `Content-Disposition: attachment; filename="data_export_<YYYY-MM-DD>.xlsx"`, lab-local (America/New_York) date.
 - **Errors (`422`, `detail` is the message shown to the user):**
   - `Unknown experiment IDs: <id>, <id>` when any picked ID does not exist.
-  - `Export too large: <n> experiments after expansion (limit 500). Narrow the selection or turn off Include whole series.`
+  - `Export too large: the <tab> tab has <n> rows and an Excel sheet holds at most 1,048,575. Narrow the selection.` (the first tab over the limit; also returned by Export all).
 
 Tabs: **Experiments** first, then the same data tabs as the single-lineage export
-(Results, Core Flood when a member is a Core Flood, Conditions, Additives, Notes), then
+(Results, Core Flood when a member is a Core Flood, XRD and Rock XRD when there is XRD of
+that kind, Conditions, Additives, Notes), then
 **Summary** last.
 
 | Experiments column | Source |
 |--------------------|--------|
-| Experiment ID, Status, Experiment type, Date, Researcher, Sample ID, Reactor number, Description | `v_experiments` |
+| Experiment ID, Status, Experiment type, Start date, Researcher, Sample ID, Description | `v_experiments` (**Start date** is `date`, the experiment start; the header read `Date` before issue #168, so an Excel lookup on that header text needs updating) |
+| Reactor | The slot label from `v_experiment_conditions.reactor_slot` (`R07`, `P03` for a Parr vessel, `CF02`). A legacy row with a number but no slot (Autoclave) shows the bare number; always text. The header read `Reactor number` and held the bare integer before 2026-11-16, so an Excel lookup on that header text needs updating. The **Conditions** tab (both exports) carries the same `Reactor` column in place of `Reactor number` |
 | Base ID, is_variant | computed from the lineage |
 
 Summary keys, in order: `Experiment count`, `Series count`, `Base IDs`,
@@ -701,7 +727,7 @@ for `-t<days>` IDs — see `docs/user_guide/REPLICATES.md` for the full limitati
 | GET | `/api/samples/{sample_id}/analyses` | List external analyses for the sample |
 | POST | `/api/samples/{sample_id}/analyses` | Create external analysis. pXRF: normalizes `pxrf_reading_no`, returns warnings for unmatched reading numbers. Auto-evaluates `characterized`. |
 | DELETE | `/api/samples/{sample_id}/analyses/{analysis_id}` | Delete analysis. Auto-evaluates `characterized`. Returns 204. |
-| GET | `/api/samples/{sample_id}/activity` | Last 100 modification log entries for the sample |
+| GET | `/api/samples/{sample_id}/activity` | Last 100 modification log entries for the sample, as `ModificationResponse` rows (`id`, `modified_by`, `modification_type`, `modified_table`, `old_values`, `new_values`, `created_at`) |
 
 ### GET /api/samples
 
@@ -754,8 +780,6 @@ Response (pXRF with missing reading):
 | GET | `/api/chemicals/compounds` | List all compounds |
 | GET | `/api/chemicals/compounds/{id}` | Get compound |
 | POST | `/api/chemicals/compounds` | Create compound |
-| GET | `/api/chemicals/additives/{conditions_id}` | List additives for a conditions record |
-| POST | `/api/chemicals/additives/{conditions_id}` | Add additive (triggers full additive calc) |
 
 ## Analysis
 
@@ -770,8 +794,6 @@ Response (pXRF with missing reading):
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/dashboard/` | **M7** Full dashboard payload: summary stats, reactor cards, Gantt timeline, recent activity. Single call. |
-| GET | `/api/dashboard/reactor-status` | Legacy — reactors with current ONGOING experiment |
-| GET | `/api/dashboard/timeline/{experiment_id}` | All timepoints with scalar/ICP presence flags |
 
 ### GET /api/dashboard/
 
@@ -810,7 +832,9 @@ Returns all dashboard data in a single call. Response shape:
         "note_text": "Swapped stir shaft; topped up catalyst",
         "event_date": "2026-09-24",
         "created_at": "2026-09-24T14:12:00Z"
-      }
+      },
+      "last_sampled_date": "2026-11-06",
+      "cumulative_h2_grams_per_ton": 72.838
     }
   ],
   "reactor_specs": {
@@ -846,8 +870,9 @@ Returns all dashboard data in a single call. Response shape:
 **Notes:**
 - Only occupied reactor slots are returned; the frontend renders every fixed slot from the summary totals, in three groups: HPHT `R01`–`R16`, Parr `P01`–`P06` and Core Flood `CF01`–`CF03` (issue #147)
 - `summary.reactors` counts only `R01`–`R16` (Yushen/Tan); the Parr vessels are counted separately in `summary.parr`
-- `base_experiment_id` (issue #150) is the run the card's experiment belongs to, so a `-2` segment's card carries its root's base ID. The dashboard's "Open run page" button on an ONGOING R or P card links to `/hpht/{base_experiment_id}`.
+- `base_experiment_id` (issue #150) is the run the card's experiment belongs to, so a `-2` segment's card carries its root's base ID. The dashboard's "Open run page" button links an R or P card to `/hpht/{base_experiment_id}` and a CF card to `/core-floods/{base_experiment_id}`, whatever the card's status (issue #157); a card with a null base ID has no run link.
 - `reactor_specs` is the hardware spec per slot label (`R01`–`R16`, `P01`–`P06`; Core Flood labels have none). It is the only copy of the table (`REACTOR_SPECS` in `backend/api/routers/dashboard.py`); the frontend reads empty-slot specs from it. Each card's `volume_mL` / `material` / `vendor` is looked up by `reactor_label`, so CF01 and P01 never inherit R01's spec
+- `last_sampled_date` and `cumulative_h2_grams_per_ton` (issue #165) describe the card's **run**: every segment sharing its `base_experiment_id`, read from `v_hpht_samples` (R and P cards) or `v_core_flood_samples` (CF cards), one query per view. Both come from the run's **last non-variant sample in view order** (`cumulative_time_post_reaction_days` NULLS LAST, then `result_id`): `cumulative_h2_grams_per_ton` is that row's run H₂ to date (g/t), and `last_sampled_date` is its `sample_date` as a lab-local (`America/New_York`) calendar date. Both are `null` when the card has no base ID or the run has no samples; `last_sampled_date` is also `null` when that last sample has no `sample_date` (no fallback to an earlier dated sample). This deliberately differs from `GET /api/hpht/runs`, whose `last_sample_date` is the latest dated sample (Mat, 2026-11-10)
 - `description` is the text of the oldest note for the experiment
 - Timeline limited to 100 most recent experiments
 - Activity limited to last 20 modification log entries
@@ -867,8 +892,17 @@ All endpoints return `UploadResponse`:
 {
   "created": 0, "updated": 0, "skipped": 0,
   "errors": [], "warnings": [], "feedbacks": [], "message": "", "dry_run": false,
-  "plan": null, "plan_hash": null
+  "plan": null, "plan_hash": null, "touched": []
 }
+```
+
+**`touched` (issue #162, `icp-oes` only):** the distinct `(experiment_id, time_post_reaction_days)` pairs the upload wrote to — new and updated timepoints alike (`bulk_create_icp_results` returns them in one list, so the two cannot be told apart per entry without changing the locked `icp_service.py`) — sorted by experiment ID, then day. On a `dry_run` it lists what *would* be written. The parse-failure and exception responses return `[]`, as does every other endpoint. When #107 gives every endpoint a structured `plan`, this can be derived from `plan.creates` + `plan.overwrites`.
+
+```json
+"touched": [
+  {"experiment_id": "HPHT_297-2", "time_post_reaction_days": 1.0},
+  {"experiment_id": "HPHT_297-2", "time_post_reaction_days": 3.0}
+]
 ```
 
 **`dry_run` (issue #100 item 1):** every POST endpoint below accepts a `dry_run` form field (default `false`). When `true`, the parser still runs in full — the response's `created`/`updated`/`skipped`/`errors`/`warnings` reflect what *would* happen — but the transaction is rolled back instead of committed, so nothing is persisted. The `message` is prefixed `[DRY RUN]` and the response's `dry_run` field is `true`. For `actlabs-rock`, `dry_run` applies to both write paths (the no-conflict direct import and the resolutions-supplied Phase 2 import); Phase 1's preflight-only response (`ConflictCheckResponse`) never writes regardless of `dry_run`. For `new-experiments` specifically, `dry_run` is also the preview half of the plan-hash handshake described below.
@@ -902,7 +936,7 @@ POST /api/bulk-uploads/new-experiments   file=<same xlsx>  plan_hash=a1b2…
   → 200 { "created": 0, "errors": ["Plan changed since preview: …"] }   # file or DB changed
 ```
 
-Note: the legacy Streamlit uploader (`legacy/streamlit_frontend/bulk_uploads.py`) calls the service directly via `bulk_upsert_from_excel` and is not covered by either gate.
+Note: the legacy Streamlit uploader, which called the service directly and bypassed both gates, was deleted in issue #189 (2026-11-13).
 
 ### Bulk experiment deletion (issue #109, Phase 1)
 
@@ -944,7 +978,7 @@ POST /api/bulk-uploads/experiment-deletion   file=<xlsx with experiment_id colum
 | POST | `/api/bulk-uploads/master-results` | Master Results upload. `file` required — the no-file SharePoint sync mode and the GET/PATCH /master-results/config endpoints were removed (issue #74). Runs calc engine on affected `ScalarResults`. Rows may carry either a full replicate ID (`SERUM_001a`) or a base ID plus an optional `Replicate` column (letter `a`–`z`, or `0`/blank for the group parent). Base + letter is resolved to the sibling experiment before upsert; unresolved or conflicting rows produce per-row errors in `errors`/`feedbacks` without aborting the upload. Replicate siblings are never auto-created by result uploads. |
 | POST | `/api/bulk-uploads/scalar-results` | Bulk-create/update `ScalarResults` rows from Excel template. Runs calc engine. Rows may carry either a full replicate ID (`SERUM_001a`) or a base ID plus an optional `Replicate` column (letter `a`–`z`, or `0`/blank for the group parent). Base + letter is resolved to the sibling experiment before upsert; unresolved or conflicting rows produce per-row errors in `errors`/`feedbacks` without aborting the upload. Replicate siblings are never auto-created by result uploads. |
 | POST | `/api/bulk-uploads/new-experiments` | Create `Experiment` + `ExperimentalConditions` rows in bulk. Returns a structured `plan` + `plan_hash` (see above). Any conflict in the plan rejects the whole file; optional `plan_hash` form field enforces the preview→commit handshake. |
-| POST | `/api/bulk-uploads/icp-oes` | Import raw ICP-OES instrument CSV. |
+| POST | `/api/bulk-uploads/icp-oes` | Import raw ICP-OES instrument CSV. Response `touched` lists the experiments and days written to (issue #162). |
 | POST | `/api/bulk-uploads/xrd-mineralogy` | Unified XRD upload — auto-detects Aeris or ActLabs format. |
 | POST | `/api/bulk-uploads/timepoint-modifications` | Bulk-add `modification` notes to result timepoints (one slot per uploader). Writes audit log (`modified_table='experiment_notes'`). |
 | POST | `/api/bulk-uploads/rock-inventory` | Create/update `SampleInfo` records. Normalises sample IDs to uppercase, no underscores. |
@@ -955,7 +989,7 @@ POST /api/bulk-uploads/experiment-deletion   file=<xlsx with experiment_id colum
 | POST | `/api/bulk-uploads/pxrf` | Import pXRF readings from instrument export. |
 | POST | `/api/bulk-uploads/experiment-deletion` | **Hard-deletes** every experiment in the file's `experiment_id` column. **403 for anyone but `mhearl@addisenergy.com`** (see below). |
 | GET | `/api/bulk-uploads/templates/{upload_type}` | Download Excel template. `upload_type`: `scalar-results`, `new-experiments`, `xrd-mineralogy`, `timepoint-modifications`, `rock-inventory`, `chemical-inventory`, `elemental-composition`, `experiment-status`, `experiment-deletion`. Returns 404 for types with no template. |
-| GET | `/api/experiments/next-ids` | Returns `{"HPHT": N, "Serum": N, "CF": N}` — next experiment number per type. Used by New Experiments card. |
+| GET | `/api/experiments/next-ids` | Returns `{"HPHT": N, "Serum": N, "CF": N, "Autoclave": N}` — next experiment number per type, from the same prefix table as `/next-id` (`HPHT`, `SERUM`, `CF`, `AUTOCLAVE`). Used by New Experiments card. Requires auth. |
 
 ## Core floods
 
@@ -979,7 +1013,7 @@ Item fields: `base_id`, `description` (the root segment's `description` note: no
 
 ### GET /api/core-floods/{base_id}
 
-Returns 404 when no Core Flood experiment has that base ID.
+The path also accepts a segment or variant ID (issue #158): `GET /api/core-floods/CF_018-3` and `GET /api/core-floods/CF_020-5_Bypass1` return the same body as `GET /api/core-floods/CF_018` / `CF_020`. The ID is looked up in `experiments` and replaced by its `base_experiment_id` (`run_service.resolve_base_id`); the response's `base_id` is always the canonical run ID, and the run page rewrites its URL to it. Returns 404 when no Core Flood experiment has that base ID, including a segment ID of another type (`GET /api/core-floods/HPHT_297-2`); the 404 detail names the ID that was sent.
 
 - `segments`, ordered by start date (undated last), then `experiment_id`: `id`, `experiment_id`, `status`, `date`, `parent_experiment_id`, `is_variant`, `description` (the `description` note), `conditions_id`, `pore_volume_mL`, `rock_mass_g`, `reactor_slot`. `conditions_id` is not in the original spec: it lets the run page edit pore volume through `PATCH /api/conditions/{id}`. `is_variant` is true when the segment has a parent and its ID starts with `<parent experiment_id>_` (e.g. `CF_020-5_Bypass1`).
 - `samples`: rows of the `v_core_flood_samples` view for this run, read as-is so the app and Power BI share one definition. Field names are the view's column names, including the derived ones (`interval_days`, `cumulative_liquid_volume_mL`, `cumulative_pore_volumes`, `cumulative_h2_grams_per_ton`, `h2_grams_per_ton_per_day`, `is_hold_interval`). Nothing is recomputed in the API. Each sample also carries `permeability_flow_rate_mL_min` (view column) and `notes` (issue #140): the sample's result-scoped `result_note`, `observation` and `modification` notes ordered by note id, each `{id, note_type, note_text, created_by}`; the experiment `description` note is never included. Variant rows keep their raw columns and have every derived column NULL. See `MODELS.md` and `docs/CALCULATIONS.md` ("Core flood run values").
@@ -995,7 +1029,7 @@ Returns 404 when no Core Flood experiment has that base ID.
 
 ### GET /api/core-floods/{base_id}/icp
 
-ICP-OES readings for the run's samples (issue #140), in `v_core_flood_samples` order (cumulative day, undated last, then `result_id`). Returns 404 when no Core Flood experiment has that base ID. A sample with no `icp_results` row is omitted, so a run without ICP returns `[]`. Variant samples are included and flagged.
+ICP-OES readings for the run's samples (issue #140), in `v_core_flood_samples` order (cumulative day, undated last, then `result_id`). Accepts a segment or variant ID like the run endpoint (issue #158). Returns 404 when no Core Flood experiment has that base ID. A sample with no `icp_results` row is omitted, so a run without ICP returns `[]`. Variant samples are included and flagged.
 
 Row fields: `result_id`, `experiment_id`, `is_variant`, `cumulative_time_post_reaction_days`, `sample_date`, `elements`: a map of lowercase element symbol (the fixed `ICP_ELEMENTS` columns) to ppm as a float. NULL elements are omitted, so `elements` holds only measured values. The row schema (`IcpRow`) and its builder (`backend/services/icp_series.py`) are shared with `GET /api/experiments/{experiment_id}/icp` (issue #143).
 
@@ -1078,6 +1112,8 @@ Item fields (`HphtRunListItem`): `base_id`, `description` (same rule as Core Flo
 
 ### GET /api/hpht/{base_id}
 
+The path also accepts a segment or variant ID (issue #158): `GET /api/hpht/HPHT_297-2` returns the same body as `GET /api/hpht/HPHT_297`, with `base_id: "HPHT_297"`. Resolution is the same as on Core Flood (`run_service.resolve_base_id`). Returns 404 when no HPHT experiment has that base ID, including a Core Flood segment ID (`GET /api/hpht/CF_018-3`); the 404 detail names the ID that was sent.
+
 - `segments`: the shared `RunSegment` shape, identical to Core Flood segments (`pore_volume_mL` is always null here), ordered by start date (undated last), then `experiment_id`.
 - `conditions` (`HphtConditionsSummary`): the setup of the **latest non-variant segment**: `experiment_id`, `conditions_id`, experiment `date`, `sample_id`, `temperature_c`, `rxn_temp_pressure_psi`, `rock_mass_g`, `water_volume_mL`, `water_to_rock_ratio`, `catalyst`, `catalyst_ppm`, `feedstock`. `null` when every segment is a variant. **`catalyst` and `catalyst_ppm` are the legacy conditions columns**: in the 2026-10-23 dev data only 71 of 432 HPHT conditions rows have `catalyst_ppm` and none since 2025-10-16, so they are usually empty. Read catalysts from the additives endpoint.
 - `samples`: rows of `v_hpht_samples` for this run, read as-is, plus `notes` (the sample's `result_note`, `observation` and `modification` notes by id, as on Core Flood). Derived columns: `interval_days`, `cumulative_h2_grams_per_ton`, `h2_grams_per_ton_per_day`, `cumulative_h2_micromoles`, `cumulative_ferrous_iron_yield_h2_pct` (NULL on variant rows). See `docs/CALCULATIONS.md` ("HPHT run values").
@@ -1094,13 +1130,15 @@ Item fields (`HphtRunListItem`): `base_id`, `description` (same rule as Core Flo
 
 ### GET /api/hpht/{base_id}/icp
 
-Same as `GET /api/core-floods/{base_id}/icp`, joined on `v_hpht_samples`: `IcpRow`s in view order, samples without an `icp_results` row omitted, variants included and flagged.
+Same as `GET /api/core-floods/{base_id}/icp`, joined on `v_hpht_samples`: `IcpRow`s in view order, samples without an `icp_results` row omitted, variants included and flagged. Accepts a segment or variant ID like the run endpoint (issue #158).
 
 ### HPHT run page (issue #150)
 
 `/hpht` and `/hpht/:baseId` in the frontend read these three endpoints (`frontend/src/api/hpht.ts`, query keys `['hpht-runs', scope, q]`, `['hpht-run', baseId]`, `['hpht-icp', baseId]`). The page writes nothing through `/api/hpht`: sample add/edit goes through `POST` / `PATCH /api/experiments/{experiment_id}/results` (the #148 `ResultEntryModal`, pointed at one segment), and segment rename/status/description through the experiment endpoints. After a write it invalidates `['hpht-runs']`, `['hpht-run', baseId]`, `['hpht-icp', baseId]`, `['experiment', segmentId]`, `['experiment-results', segmentId]` and `['dashboard']`. The charts plot `cumulative_h2_grams_per_ton`, `h2_grams_per_ton_per_day` and `cumulative_ferrous_iron_yield_h2_pct` against `cumulative_time_post_reaction_days` for non-variant rows only; a NULL value is drawn as a gap, never as 0.
 
 ## Interactive Docs
+
+Off by default. The backend serves these three URLs only when `ENABLE_API_DOCS=true` is set in `.env`; set it in dev and never in production. When it is off, the SPA catch-all answers these paths with `index.html`.
 
 - Swagger UI: `http://localhost:8000/docs`
 - ReDoc: `http://localhost:8000/redoc`

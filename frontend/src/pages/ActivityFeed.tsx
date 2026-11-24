@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom'
+import { SegmentLink } from '@/components/runs/SegmentLink'
 import type { ActivityEntry } from '@/api/dashboard'
 
 const ACTION_LABEL: Record<string, string> = {
@@ -11,6 +11,14 @@ const ACTION_COLOR: Record<string, string> = {
   create: 'text-status-ongoing',
   update: 'text-amber-400',
   delete: 'text-status-cancelled',
+}
+
+/** Audit tables whose rows are shown on the detail page's Results tab (issue #162). */
+const RESULT_TABLES = new Set(['experimental_results', 'scalar_results', 'icp_results'])
+
+/** The experiment itself was deleted (not one of its notes or results). */
+function isExperimentDeletion(entry: ActivityEntry): boolean {
+  return entry.modification_type === 'delete' && entry.modified_table === 'experiments'
 }
 
 function timeAgo(iso: string): string {
@@ -27,8 +35,6 @@ function timeAgo(iso: string): string {
 
 /** Scrollable feed of recent experiment modifications with timestamp and actor. */
 export function ActivityFeed({ entries }: { entries: ActivityEntry[] }) {
-  const navigate = useNavigate()
-
   if (entries.length === 0) {
     return (
       <p className="text-sm text-ink-muted text-center py-8">No recent activity</p>
@@ -51,12 +57,22 @@ export function ActivityFeed({ entries }: { entries: ActivityEntry[] }) {
               {entry.experiment_id && (
                 <>
                   {' — '}
-                  <button
-                    onClick={() => navigate(`/experiments/${entry.experiment_id}`)}
-                    className="text-brand-red hover:underline font-mono-data"
-                  >
-                    {entry.experiment_id}
-                  </button>
+                  {isExperimentDeletion(entry) ? (
+                    // Issue #159: the experiment is gone, so a link would only reach
+                    // "Experiment not found".
+                    <>
+                      <span className="font-mono-data line-through text-ink-muted">{entry.experiment_id}</span>
+                      {' '}
+                      <span className="text-ink-muted">deleted</span>
+                    </>
+                  ) : (
+                    <SegmentLink
+                      id={entry.experiment_id}
+                      // Issue #162: a result change opens where the result is.
+                      tab={RESULT_TABLES.has(entry.modified_table) ? 'results' : undefined}
+                      className="hover:underline"
+                    />
+                  )}
                 </>
               )}
             </p>

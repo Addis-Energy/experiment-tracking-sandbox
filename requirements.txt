@@ -77,7 +77,8 @@ watchdog>=6.0.0
 win32-setctime==1.1.0
 python-dotenv
 boto3>=1.37.38
-azure-storage-blob>=12.25.1
+azure-storage-blob==12.30.0
+azure-identity==1.27.0
 openpyxl==3.1.5
 fastapi==0.115.6
 uvicorn[standard]==0.34.2

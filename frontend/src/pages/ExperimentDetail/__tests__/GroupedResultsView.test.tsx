@@ -109,7 +109,7 @@ describe('GroupedResultsView', () => {
   it('renders mean_h2_ppm as mean ± sd with n', async () => {
     render(<GroupedResultsView baseExperimentId="SERUM_001" />, { wrapper })
     await waitFor(() => expect(screen.getByText(/n = 3/)).toBeInTheDocument())
-    expect(screen.getByText('500.0 ± 25.0')).toBeInTheDocument()
+    expect(screen.getByText('500 ± 25')).toBeInTheDocument()
   })
 
   it('renders — when mean_h2_ppm is null', async () => {
@@ -137,12 +137,37 @@ describe('GroupedResultsView', () => {
     )
   })
 
-  it('defaults the metric selector to H₂ (ppm)', async () => {
+  it('defaults the metric selector to H₂ (g/t), the headline unit (issue #160)', async () => {
     render(<GroupedResultsView baseExperimentId="SERUM_001" />, { wrapper })
     await waitFor(() => expect(screen.getByText(/n = 3/)).toBeInTheDocument())
     const select = screen.getByLabelText(/metric/i) as HTMLSelectElement
-    expect(select.value).toBe('h2_ppm')
-    expect(select.options[select.selectedIndex].text).toBe('H₂ (ppm)')
+    expect(select.value).toBe('h2_gpt')
+    expect(select.options[select.selectedIndex].text).toBe('H₂ (g/t)')
+  })
+
+  it('falls back to H₂ (ppm) when no bucket has a g/t value (no rock mass)', async () => {
+    vi.mocked(experimentsApi.getGroupRollup).mockResolvedValue(
+      ROLLUP.map((r) => ({ ...r, mean_h2_grams_per_ton: null, sd_h2_grams_per_ton: null })),
+    )
+    render(<GroupedResultsView baseExperimentId="SERUM_001" />, { wrapper })
+    await waitFor(() => expect(screen.getByText(/n = 3/)).toBeInTheDocument())
+    expect((screen.getByLabelText(/metric/i) as HTMLSelectElement).value).toBe('h2_ppm')
+  })
+
+  it('still switches to H₂ (ppm) from the g/t default', async () => {
+    const user = userEvent.setup()
+    render(<GroupedResultsView baseExperimentId="SERUM_001" />, { wrapper })
+    await waitFor(() => expect(screen.getByText(/n = 3/)).toBeInTheDocument())
+    await user.selectOptions(screen.getByLabelText(/metric/i), 'h2_ppm')
+    expect((screen.getByLabelText(/metric/i) as HTMLSelectElement).value).toBe('h2_ppm')
+  })
+
+  it('puts the legend above the plot, clear of the x-axis title (issue #160)', async () => {
+    const { container } = render(<GroupedResultsView baseExperimentId="SERUM_001" />, { wrapper })
+    await waitFor(() => expect(container.querySelector('.recharts-legend-wrapper')).not.toBeNull())
+    const legend = container.querySelector('.recharts-legend-wrapper') as HTMLElement
+    expect(legend.style.top).not.toBe('')
+    expect(legend.style.bottom).toBe('')
   })
 
   it('lists exactly the five H₂-first metric options', async () => {
@@ -158,7 +183,7 @@ describe('GroupedResultsView', () => {
     render(<GroupedResultsView baseExperimentId="SERUM_001" />, { wrapper })
     await waitFor(() => expect(screen.getByText(/n = 3/)).toBeInTheDocument())
     await user.selectOptions(screen.getByLabelText(/metric/i), 'ph')
-    expect(screen.getByText('8.10')).toBeInTheDocument()
+    expect(screen.getByText('8.1')).toBeInTheDocument()
   })
 
   it('annotates outlier members in drill-in links', async () => {
@@ -174,7 +199,7 @@ describe('GroupedResultsView', () => {
     expect(screen.getByRole('columnheader', { name: 'H₂ (g/t)' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Fe²⁺ → H₂ (%)' })).toBeInTheDocument()
     expect(screen.getByText('12.3 ± 2.5')).toBeInTheDocument()
-    expect(screen.getByText('1.23 ± 0.45')).toBeInTheDocument()
+    expect(screen.getByText('1.2 ± 0.5')).toBeInTheDocument()
   })
 })
 
@@ -282,8 +307,8 @@ describe('GroupedResultsView — issue #101: letterless timepoint vial set', () 
   it('renders a row per timepoint for a set with no replicate letters', async () => {
     render(<GroupedResultsView baseExperimentId="SERUM_pH_002" />, { wrapper })
     await waitFor(() => expect(screen.getAllByText(/n = 1/)).toHaveLength(3))
-    expect(screen.getByText('10.0')).toBeInTheDocument()
-    expect(screen.getByText('30.0')).toBeInTheDocument()
+    expect(screen.getByText('10')).toBeInTheDocument()
+    expect(screen.getByText('30')).toBeInTheDocument()
   })
 
   it('keeps every vial reachable by a drill-in link', async () => {
@@ -371,7 +396,9 @@ describe('GroupedResultsView — issue #144 net H₂ metrics', () => {
     const select = screen.getByLabelText(/metric/i) as HTMLSelectElement
     const texts = Array.from(select.options).map((o) => o.text)
     expect(texts).toEqual(expect.arrayContaining(['Net H₂ (µmol)', 'Net H₂ (g/t)', 'Net Fe²⁺ → H₂ (%)']))
-    expect(select.options[select.selectedIndex].text).toBe('H₂ (ppm)')
+    // A background link never changes the default to a net metric (#144); the raw
+    // default itself moved from ppm to g/t in issue #160.
+    expect(select.options[select.selectedIndex].text).toBe('H₂ (g/t)')
     expect(experimentsApi.getGroupH2BackgroundRollup).toHaveBeenCalledWith('SERUM_001')
   })
 

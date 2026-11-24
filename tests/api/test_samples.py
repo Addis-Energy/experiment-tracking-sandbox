@@ -138,12 +138,16 @@ def test_get_sample_detail_structure(client, db_session):
     assert "experiments" in data
 
 
-def test_upload_photo_returns_201(client, db_session, tmp_path, monkeypatch):
-    _make_sample(db_session, "PHOTO_S01")
+def _patch_store(monkeypatch, store):
     monkeypatch.setattr(
-        "backend.api.routers.samples.get_settings",
-        lambda: type("S", (), {"sample_photos_dir": str(tmp_path)})(),
+        "backend.api.routers.samples.get_photo_store", lambda s: store
     )
+
+
+def test_upload_photo_returns_201(client, db_session, tmp_path, monkeypatch):
+    from backend.services.photo_storage import LocalPhotoStore
+    _make_sample(db_session, "PHOTO_S01")
+    _patch_store(monkeypatch, LocalPhotoStore(tmp_path))
     content = b"fake image bytes"
     resp = client.post(
         "/api/samples/PHOTO_S01/photos",
@@ -155,11 +159,9 @@ def test_upload_photo_returns_201(client, db_session, tmp_path, monkeypatch):
 
 
 def test_upload_photo_rejects_bad_mime(client, db_session, tmp_path, monkeypatch):
+    from backend.services.photo_storage import LocalPhotoStore
     _make_sample(db_session, "PHOTO_S02")
-    monkeypatch.setattr(
-        "backend.api.routers.samples.get_settings",
-        lambda: type("S", (), {"sample_photos_dir": str(tmp_path)})(),
-    )
+    _patch_store(monkeypatch, LocalPhotoStore(tmp_path))
     resp = client.post(
         "/api/samples/PHOTO_S02/photos",
         files={"file": ("doc.pdf", io.BytesIO(b"pdf"), "application/pdf")},
@@ -169,7 +171,9 @@ def test_upload_photo_rejects_bad_mime(client, db_session, tmp_path, monkeypatch
 
 def test_delete_photo(client, db_session, tmp_path, monkeypatch):
     from database.models.samples import SamplePhotos
+    from backend.services.photo_storage import LocalPhotoStore
     _make_sample(db_session, "PHOTO_S03")
+    _patch_store(monkeypatch, LocalPhotoStore(tmp_path))
     photo = SamplePhotos(
         sample_id="PHOTO_S03", file_path=str(tmp_path / "x.jpg"),
         file_name="x.jpg", file_type="image/jpeg",
@@ -179,6 +183,83 @@ def test_delete_photo(client, db_session, tmp_path, monkeypatch):
     db_session.refresh(photo)
     resp = client.delete(f"/api/samples/PHOTO_S03/photos/{photo.id}")
     assert resp.status_code == 204
+
+
+def test_upload_photo_stores_ref_from_store(
+    client, db_session, monkeypatch
+):
+    from database.models.samples import SamplePhotos
+
+    class FakeStore:
+        def __init__(self):
+            self.saved = []
+
+        def save(self, sample_id, filename, content, content_type):
+            self.saved.append((sample_id, filename, content, content_type))
+            return "PHOTO_S04/shot_deadbeef.jpg"
+
+    store = FakeStore()
+    _make_sample(db_session, "PHOTO_S04")
+    _patch_store(monkeypatch, store)
+    resp = client.post(
+        "/api/samples/PHOTO_S04/photos",
+        files={"file": ("shot.jpg", io.BytesIO(b"fake image bytes"), "image/jpeg")},
+    )
+    assert resp.status_code == 201
+    row = db_session.query(SamplePhotos).filter_by(sample_id="PHOTO_S04").one()
+    assert row.file_path == "PHOTO_S04/shot_deadbeef.jpg"
+    assert store.saved == [
+        ("PHOTO_S04", "shot.jpg", b"fake image bytes", "image/jpeg")
+    ]
+
+
+def test_delete_photo_calls_store_delete(client, db_session, monkeypatch):
+    from database.models.samples import SamplePhotos
+
+    class FakeStore:
+        def __init__(self):
+            self.deleted = []
+
+        def delete(self, ref):
+            self.deleted.append(ref)
+
+    store = FakeStore()
+    _make_sample(db_session, "PHOTO_S05")
+    _patch_store(monkeypatch, store)
+    photo = SamplePhotos(
+        sample_id="PHOTO_S05", file_path="S/x.jpg",
+        file_name="x.jpg", file_type="image/jpeg",
+    )
+    db_session.add(photo)
+    db_session.commit()
+    db_session.refresh(photo)
+    resp = client.delete(f"/api/samples/PHOTO_S05/photos/{photo.id}")
+    assert resp.status_code == 204
+    assert store.deleted == ["S/x.jpg"]
+
+
+def test_delete_legacy_windows_path_photo(client, db_session, monkeypatch):
+    from unittest.mock import MagicMock
+    from azure.core.exceptions import ResourceNotFoundError
+    from database.models.samples import SamplePhotos
+    from backend.services.photo_storage import BlobPhotoStore
+
+    container = MagicMock()
+    container.delete_blob.side_effect = ResourceNotFoundError("gone")
+    _make_sample(db_session, "PHOTO_S06")
+    _patch_store(monkeypatch, BlobPhotoStore(container))
+    photo = SamplePhotos(
+        sample_id="PHOTO_S06", file_path=r"C:\Users\LabPC\x\y.jpg",
+        file_name="y.jpg", file_type="image/jpeg",
+    )
+    db_session.add(photo)
+    db_session.commit()
+    db_session.refresh(photo)
+    pid = photo.id
+    resp = client.delete(f"/api/samples/PHOTO_S06/photos/{pid}")
+    assert resp.status_code == 204
+    db_session.expire_all()
+    assert db_session.get(SamplePhotos, pid) is None
 
 
 def test_create_analysis_pxrf_warn_missing_reading(client, db_session):

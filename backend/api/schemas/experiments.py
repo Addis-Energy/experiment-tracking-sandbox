@@ -1,5 +1,8 @@
 from __future__ import annotations
 from datetime import date, datetime
+# ExperimentListItem has a field named `date`, which shadows the type in its
+# class body; annotate date fields there with this alias.
+from datetime import date as CalendarDate
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from database.models.enums import ExperimentStatus, NoteType
@@ -63,11 +66,18 @@ class ExperimentListItem(BaseModel):
     # Joined from conditions (may be None if no conditions recorded yet)
     experiment_type: Optional[str] = None
     reactor_number: Optional[int] = None
+    # Slot label (R07 / P03 / CF02), derived; None when the experiment holds no slot.
+    reactor_slot: Optional[str] = None
     # Derived from additives view
     additives_summary: Optional[str] = None
     # The note typed 'description' (Experiment.description hybrid, issue #118;
     # field name aligned in issue #122 PR-C).
     description: Optional[str] = None
+    # Issue #168: lab-local calendar date of the latest
+    # scalar_results.measurement_date over the experiment's own results; None
+    # when none is dated. Flat mode: the latest over the vials the row stands
+    # for (those that passed the filters).
+    last_result_date: Optional[CalendarDate] = None
     # Issue #98. What the ID column should render: the group stem in grouped
     # mode, the timepoint-stripped stem in flat mode. `experiment_id` above
     # continues to name the real representative row -- do not conflate them.
@@ -115,11 +125,18 @@ class ExperimentResponse(BaseModel):
     updated_at: Optional[datetime] = None
 
 
-class ExperimentDetailResponse(ExperimentResponse):
-    """Full detail including nested conditions, notes, modifications."""
-    conditions: Optional[dict] = None
-    notes: list[dict] = []
-    modifications: list[dict] = []
+class ModificationResponse(BaseModel):
+    """One ModificationsLog row as the API returns it (issue #190, D-08): the
+    experiment detail page and the sample activity feed share this shape."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    modified_by: Optional[str] = None
+    modification_type: Optional[str] = None
+    modified_table: Optional[str] = None
+    old_values: Optional[Any] = None
+    new_values: Optional[Any] = None
+    created_at: Optional[datetime] = None
 
 
 class NoteCreate(BaseModel):
@@ -177,6 +194,13 @@ class NoteResponse(BaseModel):
     needs_review: bool = False
     created_at: datetime
     updated_at: Optional[datetime] = None
+
+
+class ExperimentDetailResponse(ExperimentResponse):
+    """Full detail including nested conditions, notes, modifications."""
+    conditions: Optional[dict] = None
+    notes: list[NoteResponse] = []
+    modifications: list[ModificationResponse] = []
 
 
 class ReviewNoteItem(NoteResponse):

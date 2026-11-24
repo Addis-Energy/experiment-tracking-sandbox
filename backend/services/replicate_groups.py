@@ -3,9 +3,10 @@
 A replicate group is addressed by the base-ID string (`base_experiment_id`),
 which is NOT guaranteed to name an experiment row: lettered members
 (`a`/`b`/`c`) are the common case and the group parent frequently never
-exists. `resolve_group` is the single code path both the new `/groups/{base_id}`
-routes and the existing `/{experiment_id}/replicate-group` +
-`/{experiment_id}/rollup` wrapper endpoints delegate to.
+exists. `resolve_group` backs the `/groups/{base_id}` routes. The older
+`/{experiment_id}/replicate-group` endpoint deliberately does not delegate to it
+(see its docstring in routers/experiments.py); `/{experiment_id}/rollup` shares
+only `resolve_rollup_rows`.
 
 Label non-uniqueness: `replicate_label` is NOT unique within a group — a
 `-t<days>` timepoint vial carries the same letter as its parent vial
@@ -20,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
 from sqlalchemy import ColumnElement, and_, bindparam, func, or_, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from backend.services.replicate_collapse import timepoint_stem_expr
 from database.lineage_utils import find_replicate_group_parent
@@ -131,6 +132,9 @@ def _fetch_members(db: Session, base_id: str) -> list[Experiment]:
     with its parent vial, so ordering never assumes one row per letter."""
     return db.execute(
         select(Experiment)
+        # _compare_conditions reads every member's conditions row; load them
+        # with the members instead of one query each (issue #191, E-10).
+        .options(selectinload(Experiment.conditions))
         .where(
             Experiment.base_experiment_id == base_id,
             _member_clause(base_id),

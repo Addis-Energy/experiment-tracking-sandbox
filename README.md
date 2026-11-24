@@ -7,9 +7,10 @@ A web-based lab experiment tracking system for a small geochemistry team to log 
 - **Frontend:** React 18 + TypeScript + Vite + Tailwind CSS
 - **API:** FastAPI + uvicorn
 - **ORM:** SQLAlchemy 2.0
-- **Database:** PostgreSQL (lab PC, always-on)
+- **Database:** PostgreSQL 18 (Azure Database for PostgreSQL Flexible Server)
+- **Hosting:** Azure App Service (Linux) at `https://data.addisenergy.com`; sample photos in private Azure Blob storage
 - **Auth:** Firebase Authentication (@addisenergy.com only, approval gate)
-- **Reporting:** Read-only PostgreSQL connection for Power BI
+- **Reporting:** Read-only per-person PostgreSQL logins on request (`docs/PSQL_ACCESS.md`)
 
 ## Quick Start (Development)
 
@@ -69,9 +70,12 @@ Then start only the backend:
 .venv/Scripts/uvicorn backend.api.main:app --host 0.0.0.0 --port 8000
 ```
 
-Users on the LAN access the app at `http://<lab-pc-hostname>:8000`.
+The above is the local/self-hosted run. Production is on Azure
+(`https://data.addisenergy.com`), deployed nightly at 02:00 Eastern from `main` by the
+"Deploy to Azure" GitHub Actions workflow. See `docs/deployment/AZURE_RUNBOOK.md`.
 
-See `docs/deployment/PRODUCTION_DEPLOYMENT.md` for full Windows service setup.
+The lab PC Windows-service setup (`docs/deployment/PRODUCTION_DEPLOYMENT.md`) is retired
+2026-12 (after the Azure switch).
 
 ## Running Tests
 

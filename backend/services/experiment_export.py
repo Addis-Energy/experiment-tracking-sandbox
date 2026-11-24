@@ -28,9 +28,12 @@ from sqlalchemy.orm import Session, selectinload
 
 from backend.api.schemas.results import ICP_ELEMENTS
 from backend.services.core_flood_service import is_core_flood
+from backend.services.experiment_lookup import (
+    find_experiment, is_variant, lowest_conditions_map, series_key,
+)
 from backend.services.replicate_collapse import timepoint_stem_expr
+from backend.services.run_service import root_description
 from backend.services.workdays import LAB_TZ
-from database.models.conditions import ExperimentalConditions
 from database.experiment_id_parser import split_timepoint_token
 from database.models.experiments import Experiment
 
@@ -41,7 +44,14 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _EPOCH = datetime.min.replace(tzinfo=LAB_TZ)
 
 
-EXPORT_MAX_EXPERIMENTS: int = 500
+# The only size limit is the file format's: an Excel sheet holds 1,048,576
+# rows including the header (issue #168). Measured on the 2026-11-06 dump,
+# exporting every experiment takes ~3 s and its largest tab has ~5,700 rows.
+EXCEL_MAX_ROWS: int = 1_048_576
+
+# Text starting with one of these is a formula to Excel (openpyxl writes
+# "=..." as one); such cells are written as text (issue #168, B6).
+_FORMULA_CHARS = ("=", "+", "-", "@")
 
 
 class ExportNotFound(Exception):
@@ -167,7 +177,7 @@ CORE_FLOOD_COLUMNS: list[Column] = [
 CONDITION_COLUMNS: list[Column] = [
     ("experiment_id", "Experiment ID"),
     ("experiment_type", "Experiment type"),
-    ("reactor_number", "Reactor number"),
+    ("reactor", "Reactor"),
     ("feedstock", "Feedstock"),
     ("temperature_c", "Temperature (°C)"),
     ("particle_size", "Particle size"),
@@ -213,6 +223,28 @@ ADDITIVE_COLUMNS: list[Column] = [
     ("catalyst_ppm", "Catalyst (ppm)"),
 ]
 
+XRD_COLUMNS: list[Column] = [
+    ("experiment_id", "Experiment ID"),
+    ("is_variant", "is_variant"),
+    ("time_post_reaction_days", "Day"),
+    ("measurement_date", "Measurement date"),
+    ("rwp", "Rwp"),
+    # One "<mineral> (%)" column per mineral in the export is appended.
+]
+
+ROCK_XRD_COLUMNS: list[Column] = [
+    ("sample_id", "Sample ID"),
+    ("used_by", "Used by"),
+    ("analysis_date", "Analysis date"),
+    ("laboratory", "Laboratory"),
+    ("analyst", "Analyst"),
+    # One "<mineral> (%)" column per mineral in the export is appended.
+]
+
+# Row-dict key prefix for mineral columns, so a mineral can never collide with
+# a fixed column key.
+_MINERAL_KEY = "mineral:"
+
 NOTE_COLUMNS: list[Column] = [
     ("experiment_id", "Experiment ID"),
     ("note_id", "Note ID"),
@@ -232,13 +264,7 @@ NOTE_COLUMNS: list[Column] = [
 
 def _load_members(db: Session, exps: list[Experiment]) -> list[Member]:
     """Members for `exps` (one conditions query). Unsorted; see _series_order."""
-    conditions = {
-        c.experiment_fk: c for c in db.execute(
-            select(ExperimentalConditions)
-            .where(ExperimentalConditions.experiment_fk.in_([e.id for e in exps]))
-            .order_by(ExperimentalConditions.id.desc())  # lowest id wins below
-        ).scalars()
-    }
+    conditions = lowest_conditions_map(db, [e.id for e in exps])
 
     members: list[Member] = []
     for e in exps:
@@ -247,10 +273,9 @@ def _load_members(db: Session, exps: list[Experiment]) -> list[Member]:
         members.append(Member(
             id=e.id,
             experiment_id=e.experiment_id,
-            base_id=e.base_experiment_id or e.experiment_id,
+            base_id=series_key(e),
             experiment_type=cond.experiment_type if cond is not None else None,
-            is_variant=parent is not None
-            and e.experiment_id.startswith(parent.experiment_id + "_"),
+            is_variant=is_variant(e),
             status=e.status.value if e.status is not None else None,
             date=e.date,
             description=e.description,
@@ -285,9 +310,7 @@ def _load_experiments(db: Session, clause) -> list[Experiment]:
 
 def resolve_lineage(db: Session, experiment_id: str) -> Lineage:
     """The requested experiment's lineage, ordered as segments."""
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
+    exp = find_experiment(db, experiment_id)
     if exp is None:
         raise ExportNotFound(experiment_id)
 
@@ -298,7 +321,7 @@ def resolve_lineage(db: Session, experiment_id: str) -> Lineage:
     else:
         exps = _load_experiments(db, Experiment.id == exp.id)
     members = _series_order(_load_members(db, exps))
-    return Lineage(base_id=exp.base_experiment_id or exp.experiment_id,
+    return Lineage(base_id=series_key(exp),
                    members=members)
 
 
@@ -327,12 +350,6 @@ def resolve_selection(db: Session, experiment_ids: list[str],
         if bases:
             exps.update({e.id: e for e in _load_experiments(
                 db, Experiment.base_experiment_id.in_(bases))})
-
-    if len(exps) > EXPORT_MAX_EXPERIMENTS:
-        raise ExportRejected(
-            f"Export too large: {len(exps)} experiments after expansion "
-            f"(limit {EXPORT_MAX_EXPERIMENTS}). Narrow the selection or turn "
-            "off Include whole series.")
     return _series_order(_load_members(db, list(exps.values())))
 
 
@@ -386,12 +403,21 @@ def results_rows(db: Session, members: list[Member]) -> tuple[list[dict], list[s
 
 
 def core_flood_rows(db: Session, members: list[Member]) -> list[dict]:
-    return _rows(
+    """Series in member order; within a series, segments before side samples,
+    then cumulative day (issue #168, B5: the view order alone interleaved
+    the series of a multi-series selection)."""
+    rows = _rows(
         db,
         "SELECT * FROM v_core_flood_samples WHERE experiment_fk = ANY(:fks)"
         " ORDER BY is_variant, cumulative_time_post_reaction_days NULLS LAST,"
         " result_id",
         {"fks": [m.id for m in members]})
+    series = {}
+    for m in members:
+        series.setdefault(m.base_id, len(series))
+    series_of = {m.id: series[m.base_id] for m in members}
+    # Stable sort: keeps the view's order within each series.
+    return sorted(rows, key=lambda r: series_of[r["experiment_fk"]])
 
 
 def _ordered_by_member(members: list[Member], rows: list[dict],
@@ -404,9 +430,23 @@ def _ids(members: list[Member]) -> list[str]:
     return [m.experiment_id for m in members]
 
 
+def _reactor_display(slot: str | None, number: int | None) -> str | None:
+    """The "Reactor" cell: the slot label (R07 / P03 / CF02), else the bare number.
+
+    A number with no slot is a legacy row on a type that holds no physical slot
+    (Autoclave). Always text, so the Excel column has one type.
+    """
+    if slot:
+        return slot
+    return str(number) if number is not None else None
+
+
 def condition_rows(db: Session, members: list[Member]) -> list[dict]:
     rows = _rows(db, "SELECT * FROM v_experiment_conditions"
                      " WHERE experiment_id = ANY(:ids)", {"ids": _ids(members)})
+    for row in rows:
+        row["reactor"] = _reactor_display(row.get("reactor_slot"),
+                                          row.get("reactor_number"))
     return _ordered_by_member(members, rows, lambda r: 0)
 
 
@@ -415,6 +455,87 @@ def additive_rows(db: Session, members: list[Member]) -> list[dict]:
                      " WHERE experiment_id = ANY(:ids)", {"ids": _ids(members)})
     return _ordered_by_member(members, rows, lambda r: (
         r["addition_order"] is None, r["addition_order"] or 0, r["compound_name"]))
+
+
+def _pivot_minerals(long_rows: list[dict], key: Callable[[dict], tuple],
+                    fixed: Callable[[dict], dict]
+                    ) -> tuple[list[dict], list[str]]:
+    """Long view rows (one per mineral) as one wide row per `key`.
+
+    Mineral names are kept exactly as stored (no case folding), as everywhere
+    else in the export. Returns the rows in first-seen key order and the
+    minerals present, alphabetical (case-insensitive).
+    """
+    wide: dict[tuple, dict] = {}
+    for r in long_rows:
+        row = wide.setdefault(key(r), fixed(r))
+        row[_MINERAL_KEY + r["mineral_name"]] = r["amount_pct"]
+    minerals = sorted({r["mineral_name"] for r in long_rows},
+                      key=lambda m: (m.casefold(), m))
+    return list(wide.values()), minerals
+
+
+def _mineral_columns(minerals: list[str]) -> list[Column]:
+    return [(_MINERAL_KEY + m, f"{m} (%)") for m in minerals]
+
+
+def xrd_rows(db: Session, members: list[Member]) -> tuple[list[dict], list[str]]:
+    """Post-reaction XRD (Aeris time series): one row per experiment and day."""
+    long_rows = _rows(db, "SELECT * FROM v_experiment_xrd"
+                          " WHERE experiment_id = ANY(:ids)", {"ids": _ids(members)})
+    variant = {m.experiment_id: m.is_variant for m in members}
+    # rwp and measurement_date are per scan, so every mineral row of one
+    # (experiment, day) carries the same values; the first one is kept.
+    rows, minerals = _pivot_minerals(
+        long_rows,
+        key=lambda r: (r["experiment_id"], r["time_post_reaction_days"]),
+        fixed=lambda r: {
+            "experiment_id": r["experiment_id"],
+            "is_variant": variant[r["experiment_id"]],
+            "time_post_reaction_days": r["time_post_reaction_days"],
+            "measurement_date": r["measurement_date"],
+            "rwp": r["rwp"],
+        })
+    rows = _ordered_by_member(members, rows, lambda r: (
+        r["time_post_reaction_days"] is None, r["time_post_reaction_days"] or 0))
+    return rows, minerals
+
+
+def rock_xrd_rows(db: Session, members: list[Member]
+                  ) -> tuple[list[dict], list[str]]:
+    """Starting-rock XRD: one row per analysis of a sample the members use.
+
+    `Used by` lists the exported members with that sample ID, in member order.
+    """
+    sample_of = {r["experiment_id"]: r["sample_id"] for r in _rows(
+        db, "SELECT experiment_id, sample_id FROM v_experiments"
+            " WHERE experiment_id = ANY(:ids) AND sample_id IS NOT NULL",
+        {"ids": _ids(members)})}
+    used_by: dict[str, list[str]] = {}
+    for m in members:
+        if m.experiment_id in sample_of:
+            used_by.setdefault(sample_of[m.experiment_id], []).append(m.experiment_id)
+    if not used_by:
+        return [], []
+
+    long_rows = _rows(db, "SELECT * FROM v_sample_xrd WHERE sample_id = ANY(:sids)",
+                      {"sids": list(used_by)})
+    rows, minerals = _pivot_minerals(
+        long_rows,
+        key=lambda r: (r["sample_id"], r["analysis_date"], r["laboratory"],
+                       r["analyst"]),
+        fixed=lambda r: {
+            "sample_id": r["sample_id"],
+            "used_by": ", ".join(used_by[r["sample_id"]]),
+            "analysis_date": r["analysis_date"],
+            "laboratory": r["laboratory"],
+            "analyst": r["analyst"],
+        })
+    # Samples in the order their first user appears, then by analysis date.
+    first_use = {sid: i for i, sid in enumerate(used_by)}
+    rows.sort(key=lambda r: (first_use[r["sample_id"]], r["analysis_date"] is None,
+                             r["analysis_date"] or _EPOCH))
+    return rows, minerals
 
 
 def note_rows(db: Session, members: list[Member]) -> list[dict]:
@@ -471,12 +592,27 @@ def _write_tab(wb: Workbook, title: str, columns: list[Column],
         for c in cells:
             if isinstance(c.value, date) and not isinstance(c.value, datetime):
                 c.number_format = _DATE_FMT
+            elif isinstance(c.value, str) and c.value.startswith(_FORMULA_CHARS):
+                # Text, never a formula; quotePrefix keeps Excel from
+                # re-reading it as one when the cell is edited.
+                c.data_type = "s"
+                c.quotePrefix = True
         if dts:
             width = max(len(header), 16)
         else:
             width = max([len(header)] + [min(len(str(c.value)), 60)
                                          for c in cells if c.value is not None])
         ws.column_dimensions[get_column_letter(idx)].width = max(10, width + 2)
+
+
+def _check_sheet_limits(tabs: list[tuple[str, list[Column], list[dict]]]) -> None:
+    """Raise ExportRejected for the first tab that would not fit on a sheet."""
+    limit = EXCEL_MAX_ROWS - 1  # the header takes one row
+    for title, _columns, rows in tabs:
+        if len(rows) > limit:
+            raise ExportRejected(
+                f"Export too large: the {title} tab has {len(rows):,} rows and "
+                f"an Excel sheet holds at most {limit:,}. Narrow the selection.")
 
 
 def _results_columns(elements: list[str]) -> list[Column]:
@@ -486,10 +622,7 @@ def _results_columns(elements: list[str]) -> list[Column]:
 
 
 def _root_description(lineage: Lineage) -> str | None:
-    roots = [m for m in lineage.members if m.is_root and not m.is_variant]
-    if roots and roots[0].description:
-        return roots[0].description
-    return next((m.description for m in lineage.members if m.description), None)
+    return root_description(lineage.members, is_root=lambda m: m.is_root and not m.is_variant)
 
 
 def _data_tabs(db: Session, members: list[Member]
@@ -499,6 +632,14 @@ def _data_tabs(db: Session, members: list[Member]
         ("Results", _results_columns(elements), results)]
     if any(m.is_core_flood for m in members):
         tabs.append(("Core Flood", CORE_FLOOD_COLUMNS, core_flood_rows(db, members)))
+    # XRD tabs only when the export has XRD of that kind.
+    xrd, xrd_minerals = xrd_rows(db, members)
+    if xrd:
+        tabs.append(("XRD", XRD_COLUMNS + _mineral_columns(xrd_minerals), xrd))
+    rock, rock_minerals = rock_xrd_rows(db, members)
+    if rock:
+        tabs.append(("Rock XRD", ROCK_XRD_COLUMNS + _mineral_columns(rock_minerals),
+                     rock))
     tabs += [
         ("Conditions", CONDITION_COLUMNS, condition_rows(db, members)),
         ("Additives", ADDITIVE_COLUMNS, additive_rows(db, members)),
@@ -511,12 +652,14 @@ def build_workbook(db: Session, experiment_id: str,
                    exported_by: str | None = None) -> tuple[str, bytes]:
     """(filename, xlsx bytes) for the lineage of `experiment_id`.
 
-    Raises ExportNotFound when the experiment does not exist.
+    Raises ExportNotFound when the experiment does not exist, ExportRejected
+    when a tab would exceed Excel's sheet row limit.
     """
     lineage = resolve_lineage(db, experiment_id)
     now = lab_now()
 
     tabs = _data_tabs(db, lineage.members)
+    _check_sheet_limits(tabs)
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -554,10 +697,10 @@ EXPERIMENT_COLUMNS: list[Column] = [
     ("is_variant", "is_variant"),
     ("status", "Status"),
     ("experiment_type", "Experiment type"),
-    ("date", "Date"),
+    ("date", "Start date"),  # issue #168: was "Date"
     ("researcher", "Researcher"),
     ("sample_id", "Sample ID"),
-    ("reactor_number", "Reactor number"),
+    ("reactor", "Reactor"),
     ("description", "Description"),
 ]
 
@@ -567,7 +710,8 @@ def build_selection_workbook(db: Session, experiment_ids: list[str],
                              exported_by: str | None = None) -> tuple[str, bytes]:
     """(filename, xlsx bytes) for a picked list of experiments.
 
-    Raises ExportRejected for unknown IDs or a selection over the cap.
+    Raises ExportRejected for unknown IDs, or when a tab would exceed Excel's
+    sheet row limit.
     """
     members = resolve_selection(db, experiment_ids, include_series)
     now = lab_now()
@@ -575,12 +719,21 @@ def build_selection_workbook(db: Session, experiment_ids: list[str],
     view = {r["experiment_id"]: r for r in _rows(
         db, "SELECT * FROM v_experiments WHERE experiment_id = ANY(:ids)",
         {"ids": [m.experiment_id for m in members]})}
+    # v_experiments has no reactor_slot; v_experiment_conditions does.
+    slots = {r["experiment_id"]: r["reactor_slot"] for r in _rows(
+        db, "SELECT experiment_id, reactor_slot FROM v_experiment_conditions"
+            " WHERE experiment_id = ANY(:ids)",
+        {"ids": [m.experiment_id for m in members]})}
     experiments = [
         {**view.get(m.experiment_id, {}), "base_id": m.base_id,
-         "is_variant": m.is_variant}
+         "is_variant": m.is_variant,
+         "reactor": _reactor_display(
+             slots.get(m.experiment_id),
+             view.get(m.experiment_id, {}).get("reactor_number"))}
         for m in members]
     tabs = [("Experiments", EXPERIMENT_COLUMNS, experiments)
             ] + _data_tabs(db, members)
+    _check_sheet_limits(tabs)
 
     wb = Workbook()
     wb.remove(wb.active)

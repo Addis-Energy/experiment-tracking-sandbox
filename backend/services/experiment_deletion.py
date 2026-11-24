@@ -72,7 +72,7 @@ from typing import Any
 
 import structlog
 from sqlalchemy import delete as sql_delete, func, or_, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from database.models.analysis import ExternalAnalysis
 from database.models.characterization import ElementalAnalysis
@@ -83,6 +83,8 @@ from database.models.results import (
     ExperimentalResults, ICPResults, ResultFiles, ScalarResults,
 )
 from database.models.xrd import XRDPhase
+from backend.services.audit import audit_jsonable
+from backend.services.experiment_lookup import lowest_conditions
 from backend.services.h2_background import groups_using_background
 
 log = structlog.get_logger(__name__)
@@ -203,20 +205,9 @@ def collect_delete_impact(db: Session, exp: Experiment) -> DeleteImpact:
     return impact
 
 
-def _primitive(value: Any) -> Any:
-    """Coerce a column value to something json/JSONB can hold."""
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if hasattr(value, "value"):  # enum member (e.g. ExperimentStatus)
-        return value.value
-    if hasattr(value, "isoformat"):  # date / datetime
-        return value.isoformat()
-    return str(value)
-
-
 def _row_to_dict(instance: Any) -> dict[str, Any]:
     return {
-        col.name: _primitive(getattr(instance, col.name))
+        col.name: audit_jsonable(getattr(instance, col.name))
         for col in instance.__table__.columns
     }
 
@@ -246,11 +237,7 @@ def serialize_experiment_snapshot(db: Session, exp: Experiment) -> dict[str, Any
     # made the experiment undeletable through both the single-delete endpoint
     # and the bulk uploader (issue #109). impact.conditions still counts every
     # row; only the snapshot narrows to one.
-    conditions = db.execute(
-        select(ExperimentalConditions)
-        .where(ExperimentalConditions.experiment_fk == exp.id)
-        .order_by(ExperimentalConditions.id)
-    ).scalars().first()
+    conditions = lowest_conditions(db, exp.id)
 
     additives: list[dict[str, Any]] = []
     if conditions is not None:
@@ -375,8 +362,25 @@ def delete_experiment_cascade(
     ))
     db.flush()
 
+    # Issue #191 (E-11): load what the ORM cascade is about to delete in a few
+    # queries. Left alone, db.delete() lazy-loads each result's files, scalar
+    # row and ICP row one result at a time. This only preloads; the cascade
+    # rules in database/models/ decide what is deleted, exactly as before.
+    # `preloaded` is held until after the commit because the session keeps only
+    # weak references to loaded rows.
+    preloaded = db.execute(
+        select(ExperimentalResults)
+        .where(ExperimentalResults.experiment_fk == exp.id)
+        .options(
+            selectinload(ExperimentalResults.files),
+            selectinload(ExperimentalResults.scalar_data),
+            selectinload(ExperimentalResults.icp_data),
+        )
+    ).scalars().all()
+
     db.delete(exp)
     db.commit()
+    del preloaded
 
     log.info(
         "experiment_deleted",

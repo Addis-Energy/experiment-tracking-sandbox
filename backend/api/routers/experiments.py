@@ -1,22 +1,29 @@
 from __future__ import annotations
 import io
+from datetime import date
+from dataclasses import dataclass
 from typing import Callable, Literal, TypeVar
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, func, text, case, or_, exists
+from sqlalchemy import ColumnElement, Date, Numeric, bindparam, cast, select, func, text, case, or_, exists
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from database.models.experiments import Experiment, ExperimentNotes, ModificationsLog
 from database.models.enums import ExperimentStatus, NoteType
-from database.reactor_slot import derive_reactor_slot
+from database.reactor_slot import derive_reactor_slot, parse_reactor_reference, slot_label
 from database.experiment_id_parser import split_timepoint_token
 from backend.services.replicate_collapse import collapse_by_stem, timepoint_stem_expr
 from backend.api.dependencies.db import get_db
+from backend.api.routers._helpers import call_or_http, get_experiment_or_404
+from backend.services.experiment_lookup import (
+    find_experiment, lowest_conditions, lowest_conditions_map, scalars_for_experiment, series_key,
+)
 from backend.auth.firebase_auth import verify_firebase_token, FirebaseUser
 from backend.api.schemas.experiments import (
     ExperimentCreate, ExperimentUpdate, ExperimentListItem, ExperimentListResponse,
     ExperimentResponse, ExperimentDetailResponse, ExperimentStatusUpdate, NextIdResponse,
+    ModificationResponse,
     NoteCreate, NoteResponse, NoteUpdate, ReviewNoteItem, ReviewQueueResponse, DistinctText,
     NotesBulkPatch, NotesBulkDelete, NotesBulkResponse,
     ReplicateGroupMember, ReplicateGroupResponse,
@@ -42,25 +49,54 @@ from database.models.conditions import ExperimentalConditions
 from database.models.samples import SampleInfo
 from backend.api.schemas.chemicals import AdditiveResponse, ChemicalAdditiveUpsert
 from backend.services.calculations.registry import recalculate
+from backend.services import additive_service
 from backend.services import notes as notes_service
 from backend.services import experiment_export
 from backend.services.experiment_deletion import (
     DeleteImpact, collect_delete_impact, delete_experiment_cascade,
 )
 from backend.services.denormalized_ids import sync_denormalized_experiment_id
+from backend.services.workdays import LAB_TZ
 
 log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/experiments", tags=["experiments"])
 
 T = TypeVar("T")
 
-# Prefix mapping for next-id endpoint
+# Experiment type -> ID prefix, for /next-id and /next-ids. One table for both
+# (issue #190, D-03): they used to disagree on Autoclave, and LIKE is
+# case-sensitive on PostgreSQL. AUTOCLAVE is the canonical prefix (Mat, 2026-11-13).
 _TYPE_PREFIX: dict[str, str] = {
     "HPHT": "HPHT",
     "Serum": "SERUM",
     "Autoclave": "AUTOCLAVE",
     "Core Flood": "CF",
 }
+
+# /next-ids response key -> experiment type. The keys are part of the response
+# contract the bulk-upload page reads, so "CF" stays "CF".
+_NEXT_IDS_LABELS: dict[str, str] = {
+    "HPHT": "HPHT",
+    "Serum": "Serum",
+    "CF": "Core Flood",
+    "Autoclave": "Autoclave",
+}
+
+
+def _max_id_number(db: Session, prefix: str) -> int:
+    """Highest all-digit suffix among IDs shaped ``<prefix>_<digits>``; 0 if none.
+
+    Computed in SQL (one aggregate) rather than by loading every matching ID.
+    The LIKE pattern is deliberately the one the Python loop used, unescaped
+    underscore included; the regex then keeps only all-digit suffixes.
+    """
+    suffix = func.substr(Experiment.experiment_id, len(prefix) + 2)
+    highest = db.execute(
+        select(func.max(cast(suffix, Numeric)))
+        .where(Experiment.experiment_id.like(f"{prefix}_%"))
+        .where(suffix.op("~")("^[0-9]+$"))
+    ).scalar_one_or_none()
+    return int(highest) if highest is not None else 0
 
 
 def _is_group_parent_spelling(derivation, treatment, replicate_label) -> bool:
@@ -73,30 +109,106 @@ def _is_group_parent_spelling(derivation, treatment, replicate_label) -> bool:
     return treatment is None and replicate_label is None and (derivation is None or derivation in (0, 1))
 
 
-def _build_list_item(db: Session, exp: Experiment) -> dict:
-    """Build the ExperimentListItem payload dict for one experiment row."""
-    item_data = {c.key: getattr(exp, c.key) for c in Experiment.__table__.columns}
-    # .first() with an explicit order, not scalar_one_or_none(): UNIQUE
-    # (experiment_fk) forbids a second row going forward, but one duplicate on a
-    # pre-constraint database used to 500 this entire endpoint (issue #109).
-    cond = db.execute(
-        select(ExperimentalConditions)
-        .where(ExperimentalConditions.experiment_fk == exp.id)
-        .order_by(ExperimentalConditions.id)
-    ).scalars().first()
-    item_data["experiment_type"] = cond.experiment_type if cond else None
-    item_data["reactor_number"] = cond.reactor_number if cond else None
-    additive_row = db.execute(
+def _lab_date(expr: ColumnElement) -> ColumnElement[date]:
+    """A timestamptz expression as its lab-local (America/New_York) calendar date.
+
+    Comparing the raw timestamp to a date string means midnight, so a sample
+    or start at 14:00 on the upper bound's day would fall outside it.
+    """
+    return cast(func.timezone(LAB_TZ.key, expr), Date)
+
+
+def _last_result_date_expr(experiment_pk: ColumnElement[int] | int) -> ColumnElement[date]:
+    """An experiment's last result date (issue #168): the lab-local calendar
+    date of MAX(scalar_results.measurement_date) over its own results; NULL
+    when none is dated. No fallback to start date + days.
+
+    `experiment_pk` is a column (correlated subquery) or a plain id. The list
+    filter and the list item's `last_result_date` both use this, so they
+    cannot drift apart.
+    """
+    latest = (
+        select(func.max(ScalarResults.measurement_date))
+        .join(ExperimentalResults, ExperimentalResults.id == ScalarResults.result_id)
+        .where(ExperimentalResults.experiment_fk == experiment_pk)
+        .scalar_subquery()
+    )
+    return _lab_date(latest)
+
+
+def _last_result_dates(db: Session, experiment_pks: list[int]) -> dict[int, date | None]:
+    """Each experiment's last result date, in one query (issue #168 column)."""
+    if not experiment_pks:
+        return {}
+    return {
+        pk: last for pk, last in db.execute(
+            select(Experiment.id, _last_result_date_expr(Experiment.id))
+            .where(Experiment.id.in_(experiment_pks))
+        )
+    }
+
+
+def _latest(dates: dict[int, date | None], experiment_pks: list[int]) -> date | None:
+    """The latest last result date among `experiment_pks` (None if none dated):
+    what a list row standing for several experiments shows (issue #168)."""
+    known = [dates[pk] for pk in experiment_pks if dates.get(pk) is not None]
+    return max(known) if known else None
+
+
+def _additive_summaries(db: Session, experiment_pks: list[int]) -> dict[int, str]:
+    """`<compound> <amount> <unit>; ...` per experiment, in one query.
+
+    Ordered by compound id. That is the order the old one-query-per-row version
+    produced on the dev database (checked against 596 list rows, issue #191);
+    stating it keeps the text stable. v_experiment_additives_summary builds the
+    same text without an ORDER BY and disagrees with this order for about a
+    third of experiments, so the list does not read the view (sweep D-04).
+    """
+    if not experiment_pks:
+        return {}
+    rows = db.execute(
         text("""
-            SELECT string_agg(c.name || ' ' || CAST(a.amount AS TEXT) || ' ' || a.unit, '; ')
+            SELECT ec.experiment_fk,
+                   string_agg(c.name || ' ' || CAST(a.amount AS TEXT) || ' ' || a.unit, '; '
+                              ORDER BY c.id, a.id)
             FROM chemical_additives a
             JOIN experimental_conditions ec ON ec.id = a.experiment_id
             JOIN compounds c ON c.id = a.compound_id
-            WHERE ec.experiment_fk = :exp_fk
-        """),
-        {"exp_fk": exp.id},
-    ).fetchone()
-    item_data["additives_summary"] = additive_row[0] if additive_row else None
+            WHERE ec.experiment_fk IN :exp_fks
+            GROUP BY ec.experiment_fk
+        """).bindparams(bindparam("exp_fks", expanding=True)),
+        {"exp_fks": list(experiment_pks)},
+    )
+    return {experiment_fk: summary for experiment_fk, summary in rows}
+
+
+@dataclass(frozen=True)
+class _ListLookups:
+    """What a page of list rows needs beyond its Experiment rows, fetched in two
+    queries for the whole page instead of two per row (issue #191, E-01)."""
+
+    conditions: dict[int, ExperimentalConditions]
+    additives: dict[int, str]
+
+    @classmethod
+    def load(cls, db: Session, exps: list[Experiment]) -> "_ListLookups":
+        pks = [e.id for e in exps]
+        return cls(
+            # Lowest id wins and a duplicate row never raises (issue #109).
+            conditions=lowest_conditions_map(db, pks),
+            additives=_additive_summaries(db, pks),
+        )
+
+
+def _build_list_item(exp: Experiment, lookups: _ListLookups) -> dict:
+    """Build the ExperimentListItem payload dict for one experiment row. No query:
+    `exp.description` needs `description_note` loaded with the row."""
+    item_data = {c.key: getattr(exp, c.key) for c in Experiment.__table__.columns}
+    cond = lookups.conditions.get(exp.id)
+    item_data["experiment_type"] = cond.experiment_type if cond else None
+    item_data["reactor_number"] = cond.reactor_number if cond else None
+    item_data["reactor_slot"] = cond.reactor_slot if cond else None
+    item_data["additives_summary"] = lookups.additives.get(exp.id)
     # Issue #118 PR3: the description is the note typed 'description'
     # (Experiment.description hybrid), no longer the lowest-id note.
     # Issue #122 PR-C: the list item field is `description`.
@@ -114,8 +226,11 @@ def list_experiments(
     sample_id: str | None = None,
     experiment_type: str | None = None,
     reactor_number: int | None = None,
-    date_from: str | None = None,
-    date_to: str | None = None,
+    reactor: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    last_result_from: date | None = None,
+    last_result_to: date | None = None,
     description: str | None = None,
     additive: str | None = None,
     is_background: bool | None = None,
@@ -147,14 +262,41 @@ def list_experiments(
         stmt = stmt.where(Experiment.experiment_id.ilike(f"%{search}%"))
     if sample_id:
         stmt = stmt.where(Experiment.sample_id.ilike(f"%{sample_id}%"))
+    # Issue #168: both date pairs are inclusive lab-local calendar dates, so a
+    # start or sample at 14:00 on the `_to` day is inside the range. A NULL
+    # date compares false, so setting either bound drops undated experiments.
+    # Applied to `stmt` before the grouping branch, so `total` reflects them.
     if date_from:
-        stmt = stmt.where(Experiment.date >= date_from)
+        stmt = stmt.where(_lab_date(Experiment.date) >= date_from)
     if date_to:
-        stmt = stmt.where(Experiment.date <= date_to)
+        stmt = stmt.where(_lab_date(Experiment.date) <= date_to)
+    if last_result_from or last_result_to:
+        last_result = _last_result_date_expr(Experiment.id)
+        if last_result_from:
+            stmt = stmt.where(last_result >= last_result_from)
+        if last_result_to:
+            stmt = stmt.where(last_result <= last_result_to)
     if experiment_type:
         stmt = stmt.where(ExperimentalConditions.experiment_type == experiment_type)
     if reactor_number is not None:
         stmt = stmt.where(ExperimentalConditions.reactor_number == reactor_number)
+    if reactor and reactor.strip():
+        # A label (P3, R03, CF1) names one slot; a bare number states no series,
+        # so it matches that number in any series -- including a legacy row
+        # with a number and no slot.
+        try:
+            number, prefix = parse_reactor_reference(reactor.strip())
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown reactor '{reactor}'; use a label such as R07, "
+                       f"P03 or CF02, or a number",
+            )
+        if prefix is None:
+            stmt = stmt.where(ExperimentalConditions.reactor_number == number)
+        else:
+            stmt = stmt.where(
+                ExperimentalConditions.reactor_slot == slot_label(prefix, number))
     if description:
         stmt = stmt.where(Experiment.description.ilike(f"%{description}%"))
     if is_background is not None:
@@ -256,6 +398,7 @@ def list_experiments(
         total = db.execute(select(func.count()).select_from(reps_sq)).scalar_one()
         page_stmt = (
             select(Experiment)
+            .options(selectinload(Experiment.description_note))
             .where(Experiment.id.in_(select(reps_sq.c.id)))
             .order_by(Experiment.experiment_number.desc())
         )
@@ -284,71 +427,102 @@ def list_experiments(
                 ),
             ).label("rn"),
             func.count().over(partition_by=stem).label("vial_count"),
+            # Issue #168 (Mat, 2026-11-11): a row standing for several vials
+            # shows the latest last result date among the vials it stands for
+            # -- those that passed the filters, like vial_count -- since
+            # picking the row exports all of them.
+            func.max(_last_result_date_expr(matched_sq.c.id))
+            .over(partition_by=stem).label("last_result_date"),
         ).subquery()
         reps_sq = (
-            select(ranked_sq.c.id, ranked_sq.c.stem, ranked_sq.c.vial_count)
+            select(ranked_sq.c.id, ranked_sq.c.stem, ranked_sq.c.vial_count,
+                   ranked_sq.c.last_result_date)
             .where(ranked_sq.c.rn == 1)
             .subquery()
         )
         total = db.execute(select(func.count()).select_from(reps_sq)).scalar_one()
         rep_rows = db.execute(
-            select(Experiment, reps_sq.c.stem, reps_sq.c.vial_count)
+            select(Experiment, reps_sq.c.stem, reps_sq.c.vial_count,
+                   reps_sq.c.last_result_date)
+            .options(selectinload(Experiment.description_note))
             .join(reps_sq, reps_sq.c.id == Experiment.id)
             .order_by(Experiment.experiment_number.desc())
             .offset(skip)
             .limit(limit)
         ).all()
         rows = [row[0] for row in rep_rows]
-        flat_collapse = {row[0].id: (row[1], row[2]) for row in rep_rows}
+        flat_collapse = {row[0].id: (row[1], row[2], row[3]) for row in rep_rows}
 
-    items = []
-    for exp in rows:
-        item_data = _build_list_item(db, exp)
-        if not group_replicates:
-            # Issue #98: label the row by its timepoint stem so the internal
-            # '-t<days>' token never reaches the UI.
-            stem, vial_count = flat_collapse[exp.id]
-            item_data["group_display_id"] = stem
-            item_data["vial_count"] = vial_count
-        if group_replicates:
+    # Issue #191 (E-01): no query inside the loop below. Grouped mode resolves
+    # every page row's bucket, and every bucket row's last result date, here.
+    buckets: dict[str, list[Experiment]] = {}
+    bucket_keys: dict[int, str] = {}
+    last_result_dates: dict[int, date | None] = {}
+    if group_replicates:
+        for exp in rows:
             # Bucket key for this representative -- mirrors Block A: a
             # lettered representative (orphan-set case) buckets on its own
             # base_experiment_id; an explicit "-0"/"-1" parent spelling also
             # buckets on base_experiment_id (the stem) to join its lettered
             # members; a bare-stem/standalone representative buckets on its
-            # own experiment_id. Members are fetched from the UNFILTERED
-            # table (attached in full regardless of whether they matched the
-            # query filters) and identified by id, never by replicate_label
-            # (a '-t<days>' vial shares its letter with its parent vial).
+            # own experiment_id.
             if exp.replicate_label is not None:
-                bucket_key = exp.base_experiment_id or exp.experiment_id
+                bucket_keys[exp.id] = series_key(exp)
             elif exp.base_experiment_id and exp.experiment_id in (
                 f"{exp.base_experiment_id}-0", f"{exp.base_experiment_id}-1",
             ):
-                bucket_key = exp.base_experiment_id
+                bucket_keys[exp.id] = exp.base_experiment_id
             else:
                 # Must mirror _bucket_key_expr's else_ branch, which strips the
                 # '-t<days>' token (issue #98) -- otherwise a letterless '-t'
                 # vial's bucket key does not round-trip and the membership
                 # query below matches nothing.
-                bucket_key = split_timepoint_token(exp.experiment_id)[0]
-            # Every row in this bucket, resolved from the UNFILTERED table so a
-            # filtered query still describes the whole group. Matching on the
-            # bucket-key expression (rather than base_experiment_id) is what
-            # picks up letterless '-t' vials; it costs a scan per page row,
-            # which is fine at this table's size and matches the existing
-            # per-row queries in _build_list_item.
-            bucket_rows = db.execute(
-                select(Experiment)
-                .where(_bucket_key_expr(Experiment) == bucket_key)
+                bucket_keys[exp.id] = split_timepoint_token(exp.experiment_id)[0]
+        if bucket_keys:
+            # Every row of every page bucket, resolved from the UNFILTERED
+            # table so a filtered query still describes the whole group
+            # (members are attached in full whether or not they matched the
+            # filters). Matching on the bucket-key expression (rather than
+            # base_experiment_id) is what picks up letterless '-t' vials. One
+            # query for the page; the ORDER BY gives each bucket its row order.
+            key_expr = _bucket_key_expr(Experiment)
+            for member, key in db.execute(
+                select(Experiment, key_expr)
+                .options(selectinload(Experiment.description_note))
+                .where(key_expr.in_(sorted(set(bucket_keys.values()))))
                 .order_by(
                     Experiment.replicate_label.asc().nulls_first(),
                     Experiment.id_timepoint_days.asc().nulls_first(),
                     Experiment.experiment_number.asc(),
                 )
-            ).scalars().all()
+            ):
+                buckets.setdefault(key, []).append(member)
+        last_result_dates = _last_result_dates(
+            db, [m.id for members in buckets.values() for m in members])
+    lookups = _ListLookups.load(
+        db, list(rows) + [m for members in buckets.values() for m in members])
+
+    items = []
+    for exp in rows:
+        item_data = _build_list_item(exp, lookups)
+        if not group_replicates:
+            # Issue #98: label the row by its timepoint stem so the internal
+            # '-t<days>' token never reaches the UI.
+            stem, vial_count, last_result_date = flat_collapse[exp.id]
+            item_data["group_display_id"] = stem
+            item_data["vial_count"] = vial_count
+            item_data["last_result_date"] = last_result_date
+        if group_replicates:
+            # Members are identified by id, never by replicate_label (a
+            # '-t<days>' vial shares its letter with its parent vial).
+            bucket_key = bucket_keys[exp.id]
+            bucket_rows = buckets.get(bucket_key, [])
             members = [m for m in bucket_rows if m.replicate_label is not None]
             item_data["vial_count"] = len(bucket_rows)
+            # Issue #168: like vial_count, the latest across the whole
+            # (unfiltered) bucket, as the flat row does across its vials.
+            item_data["last_result_date"] = _latest(
+                last_result_dates, [r.id for r in bucket_rows])
 
             if len(bucket_rows) > 1 and members:
                 # A real group: label the row by the group stem (issue #98 D2).
@@ -362,9 +536,12 @@ def list_experiments(
                 # letter (D8), unlike the pre-#98 siblings-only list.
                 item_data["replicates"] = []
                 for group in collapse_by_stem(members):
-                    child = _build_list_item(db, group.representative)
+                    child = _build_list_item(group.representative, lookups)
                     child["group_display_id"] = group.stem
                     child["vial_count"] = group.vial_count
+                    child["last_result_date"] = _latest(last_result_dates, [
+                        m.id for m in members
+                        if split_timepoint_token(m.experiment_id)[0] == group.stem])
                     item_data["replicates"].append(
                         ExperimentListItem.model_validate(child)
                     )
@@ -387,44 +564,25 @@ def get_next_experiment_id(
 ) -> NextIdResponse:
     """Return the next auto-incremented experiment ID for the given type."""
     prefix = _TYPE_PREFIX.get(type, type.upper().replace(" ", "_"))
-    pattern = f"{prefix}_%"
-    rows = db.execute(
-        select(Experiment.experiment_id).where(Experiment.experiment_id.like(pattern))
-    ).scalars().all()
-    max_num = 0
-    for eid in rows:
-        suffix = eid[len(prefix) + 1:]
-        if suffix.isdigit():
-            max_num = max(max_num, int(suffix))
-    next_num = str(max_num + 1).zfill(3)
+    next_num = str(_max_id_number(db, prefix) + 1).zfill(3)
     return NextIdResponse(next_id=f"{prefix}_{next_num}")
 
 
 @router.get("/next-ids")
 def get_next_experiment_ids(
     db: Session = Depends(get_db),
+    current_user: FirebaseUser = Depends(verify_firebase_token),
 ) -> dict:
     """
-    Return the next sequence number for each experiment type, derived by
-    parsing the numeric suffix from experiment_id (same logic as /next-id).
-    No auth required — read-only, non-sensitive.
+    Return the next sequence number for each experiment type, from the same
+    prefix table and suffix rule as /next-id.
 
     Response: ``{"HPHT": 107, "Serum": 165, "CF": 15, "Autoclave": 8}``
     """
-    label_prefix = {"HPHT": "HPHT", "Serum": "SERUM", "CF": "CF", "Autoclave": "Autoclave"}
-    result: dict[str, int] = {}
-    for label, prefix in label_prefix.items():
-        rows = db.execute(
-            select(Experiment.experiment_id)
-            .where(Experiment.experiment_id.like(f"{prefix}_%"))
-        ).scalars().all()
-        max_num = 0
-        for eid in rows:
-            suffix = eid[len(prefix) + 1:]
-            if suffix.isdigit():
-                max_num = max(max_num, int(suffix))
-        result[label] = max_num + 1
-    return result
+    return {
+        label: _max_id_number(db, _TYPE_PREFIX[experiment_type]) + 1
+        for label, experiment_type in _NEXT_IDS_LABELS.items()
+    }
 
 
 def _group_member_to_detail(member) -> ReplicateGroupMemberDetail:
@@ -664,17 +822,36 @@ def _load_notes_for_bulk(db: Session, ids: list[int]) -> list[ExperimentNotes]:
     return notes
 
 
+# 422 wording for a ck_note_scope violation, per endpoint. The rule itself is
+# notes_service.breaks_note_scope; only the phrasing differs by context.
+_ADD_SCOPE_DETAIL: dict[NoteType, str] = {
+    NoteType.description: "A 'description' note is experiment-level; do not pass result_id.",
+    NoteType.modification: "A 'modification' note must be scoped to a result or carry an event_date.",
+    NoteType.result_note: "A 'result_note' note must name the result_id it describes.",
+}
+_PATCH_SCOPE_DETAIL: dict[NoteType, str] = {
+    NoteType.description: "A result-scoped note cannot become the 'description'; it is experiment-level.",
+    NoteType.modification: "A 'modification' note must be scoped to a result or carry an event_date.",
+    NoteType.result_note: "A 'result_note' note must be scoped to a result.",
+}
+_BULK_SCOPE_DETAIL: dict[NoteType, str] = {
+    NoteType.description: "Result-scoped notes cannot become 'description'",
+    NoteType.modification: "A 'modification' note must be scoped to a result or carry an event_date",
+    NoteType.result_note: "A 'result_note' note must be scoped to a result",
+}
+
+
 def _check_bulk_retype(db: Session, notes: list[ExperimentNotes], target: NoteType) -> None:
     """Mirror ck_note_scope and uq_one_description_per_experiment for a whole
     batch so the caller gets one 422/409 naming the offenders and nothing is
     half-applied. Same rules as patch_note, applied to N rows."""
+    offending = [
+        n.id for n in notes
+        if notes_service.breaks_note_scope(target, n.result_id, n.event_date)
+    ]
+    if offending:
+        raise HTTPException(status_code=422, detail=f"{_BULK_SCOPE_DETAIL[target]}: {offending}")
     if target is NoteType.description:
-        offending = [n.id for n in notes if n.result_id is not None]
-        if offending:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Result-scoped notes cannot become 'description': {offending}",
-            )
         # Two selected notes on one experiment, or an existing description there.
         wanting = [n for n in notes if n.note_type is not NoteType.description]
         per_exp: dict[int, list[int]] = {}
@@ -694,20 +871,6 @@ def _check_bulk_retype(db: Session, notes: list[ExperimentNotes], target: NoteTy
             raise HTTPException(
                 status_code=409,
                 detail=f"These experiments would end up with more than one description: {eids}",
-            )
-    elif target is NoteType.modification:
-        offending = [n.id for n in notes if n.result_id is None and n.event_date is None]
-        if offending:
-            raise HTTPException(
-                status_code=422,
-                detail=f"A 'modification' note must be scoped to a result or carry an event_date: {offending}",
-            )
-    elif target is NoteType.result_note:
-        offending = [n.id for n in notes if n.result_id is None]
-        if offending:
-            raise HTTPException(
-                status_code=422,
-                detail=f"A 'result_note' note must be scoped to a result: {offending}",
             )
 
 
@@ -813,11 +976,7 @@ def get_experiment_results(
 ) -> list[ResultWithFlagsResponse]:
     """Return all result timepoints for an experiment, with scalar and ICP existence flags."""
 
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
 
     results = db.execute(
         select(ExperimentalResults)
@@ -836,21 +995,37 @@ def get_experiment_results(
     ).scalars():
         notes_by_result.setdefault(n.result_id, []).append(n)
 
-    return [_result_with_flags(db, r, notes_by_result.get(r.id, [])) for r in results]
+    # Issue #191 (E-02): scalar rows and ICP presence for the whole tab in two
+    # queries, not two per result.
+    scalars, with_icp = _scalars_and_icp(db, [r.id for r in results])
+    return [
+        _result_with_flags(r, notes_by_result.get(r.id, []), scalars.get(r.id), r.id in with_icp)
+        for r in results
+    ]
+
+
+def _scalars_and_icp(db: Session, result_ids: list[int]) -> tuple[dict[int, ScalarResults], set[int]]:
+    """Scalar row by result id, and the ids of results that have an ICP row."""
+    from database.models.results import ICPResults
+
+    if not result_ids:
+        return {}, set()
+    scalars = {
+        s.result_id: s for s in db.execute(
+            select(ScalarResults).where(ScalarResults.result_id.in_(result_ids))
+        ).scalars()
+    }
+    with_icp = set(db.execute(
+        select(ICPResults.result_id).where(ICPResults.result_id.in_(result_ids))
+    ).scalars())
+    return scalars, with_icp
 
 
 def _result_with_flags(
-    db: Session, r: ExperimentalResults, r_notes: list[ExperimentNotes],
+    r: ExperimentalResults, r_notes: list[ExperimentNotes],
+    scalar: ScalarResults | None, has_icp: bool,
 ) -> ResultWithFlagsResponse:
     """One Results-tab row: the result, its scalar values, flags and notes."""
-    from database.models.results import ICPResults
-
-    scalar = db.execute(
-        select(ScalarResults).where(ScalarResults.result_id == r.id)
-    ).scalar_one_or_none()
-    icp = db.execute(
-        select(ICPResults).where(ICPResults.result_id == r.id)
-    ).scalar_one_or_none()
     return ResultWithFlagsResponse(
         id=r.id,
         experiment_fk=r.experiment_fk,
@@ -861,7 +1036,7 @@ def _result_with_flags(
         created_at=r.created_at,
         sample_tube_number=r.sample_tube_number,
         has_scalar=scalar is not None,
-        has_icp=icp is not None,
+        has_icp=has_icp,
         has_modification_note=any(n.note_type is NoteType.modification for n in r_notes),
         notes=[NoteResponse.model_validate(n) for n in r_notes],
         grams_per_ton_yield=scalar.grams_per_ton_yield if scalar else None,
@@ -897,17 +1072,16 @@ def _result_entry_response(db: Session, result_id: int) -> ResultWithFlagsRespon
         select(ExperimentNotes).where(ExperimentNotes.result_id == r.id)
         .order_by(ExperimentNotes.id)
     ).scalars().all()
-    return _result_with_flags(db, r, list(notes))
+    scalars, with_icp = _scalars_and_icp(db, [r.id])
+    return _result_with_flags(r, list(notes), scalars.get(r.id), r.id in with_icp)
 
 
 def _run_result_entry(fn: Callable[[], T]) -> T:
     """Run a result-entry service call, mapping its errors to 404/422."""
-    try:
-        return fn()
-    except result_entry.ResultEntryNotFound as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except result_entry.ResultEntryInvalid as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    return call_or_http(fn, (
+        (result_entry.ResultEntryNotFound, 404),
+        (result_entry.ResultEntryInvalid, 422),
+    ))
 
 
 @router.post(
@@ -982,12 +1156,8 @@ def get_experiment_rollup(
     current_user: FirebaseUser = Depends(verify_firebase_token),
 ) -> list[RollupTimepointResponse]:
     """Cross-replicate mean/median/std per timepoint from v_results_scalar_rollup."""
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
-    base = exp.base_experiment_id or exp.experiment_id
+    exp = get_experiment_or_404(db, experiment_id)
+    base = series_key(exp)
     rows = resolve_rollup_rows(db, base)
     return [RollupTimepointResponse(**dict(r)) for r in rows]
 
@@ -1011,12 +1181,8 @@ def get_replicate_group(
     tests/api/test_experiment_rollup.py::TestReplicateGroupWrapperShapes for
     the locked-in regression coverage.
     """
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
-    base = exp.base_experiment_id or exp.experiment_id
+    exp = get_experiment_or_404(db, experiment_id)
+    base = series_key(exp)
     parent = exp if exp.replicate_label is None else exp.parent
     if parent is not None:
         members = db.execute(
@@ -1079,11 +1245,7 @@ def update_experiment_status(
     the caller can complete it and retry. A confirm-and-supersede dialog is a
     deferred follow-up; the backend contract is the same with or without it.
     """
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
 
     if payload.status == ExperimentStatus.ONGOING:
         conditions = exp.conditions
@@ -1135,9 +1297,7 @@ def list_experiment_additives(
     current_user: FirebaseUser = Depends(verify_firebase_token),
 ) -> list[AdditiveResponse]:
     """List chemical additives for an experiment by its string ID. Returns [] if no conditions exist."""
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
+    exp = find_experiment(db, experiment_id)
     if exp is None:
         return []
     # Resolve via experiment_fk, not the denormalized string (issue #109): both
@@ -1146,11 +1306,7 @@ def list_experiment_additives(
     # string-keyed lookup could 500 on a duplicated string, return [] for a real
     # experiment, or (worse, in the PUT/DELETE variants below) touch another
     # experiment's row.
-    conditions = db.execute(
-        select(ExperimentalConditions)
-        .where(ExperimentalConditions.experiment_fk == exp.id)
-        .order_by(ExperimentalConditions.id)
-    ).scalars().first()
+    conditions = lowest_conditions(db, exp.id)
     if conditions is None:
         return []
     rows = db.execute(
@@ -1174,56 +1330,21 @@ def upsert_experiment_additive(
     Accepts experiment string ID and resolves conditions row internally.
     ChemicalAdditive.experiment_id is a FK to experimental_conditions.id (not experiments.id).
     """
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment conditions not found")
+    exp = get_experiment_or_404(db, experiment_id, detail="Experiment conditions not found")
     # Resolve via experiment_fk, not the denormalized string (issue #109):
     # a stale string could otherwise write this additive onto another
     # experiment's conditions row.
-    conditions = db.execute(
-        select(ExperimentalConditions)
-        .where(ExperimentalConditions.experiment_fk == exp.id)
-        .order_by(ExperimentalConditions.id)
-    ).scalars().first()
+    conditions = lowest_conditions(db, exp.id)
     if conditions is None:
         raise HTTPException(status_code=404, detail="Experiment conditions not found")
     compound = db.get(Compound, compound_id)
     if compound is None:
         raise HTTPException(status_code=404, detail="Compound not found")
-    existing = db.execute(
-        select(ChemicalAdditive)
-        .where(ChemicalAdditive.experiment_id == conditions.id)
-        .where(ChemicalAdditive.compound_id == compound_id)
-    ).scalar_one_or_none()
-    if existing:
-        old_vals = {"amount": existing.amount, "unit": existing.unit.value if existing.unit else None}
-        mod_type = "update"
-        for k, v in payload.model_dump(exclude_unset=True).items():
-            setattr(existing, k, v)
-        additive = existing
-    else:
-        old_vals = None
-        mod_type = "create"
-        additive = ChemicalAdditive(
-            experiment_id=conditions.id,
-            compound_id=compound_id,
-            **payload.model_dump(),
-        )
-        db.add(additive)
-    db.flush()
-    recalculate(additive, db)
-    new_vals = {"amount": additive.amount, "unit": additive.unit.value if additive.unit else None}
-    db.add(ModificationsLog(
-        experiment_id=experiment_id,
-        experiment_fk=exp.id,
-        modified_by=current_user.uid,
-        modification_type=mod_type,
-        modified_table="chemical_additives",
-        old_values=old_vals,
-        new_values=new_vals,
-    ))
+    additive = additive_service.upsert_additive(
+        db, exp, conditions, compound_id,
+        fields=payload.model_dump(), fields_set=payload.model_dump(exclude_unset=True),
+        user_email=current_user.email,
+    )
     db.commit()
     db.refresh(additive)
     log.info("additive_upserted", experiment_id=experiment_id, compound_id=compound_id)
@@ -1238,44 +1359,16 @@ def delete_experiment_additive(
     current_user: FirebaseUser = Depends(verify_firebase_token),
 ) -> Response:
     """Remove a chemical additive from an experiment."""
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
     # Resolve via experiment_fk, not the denormalized string (issue #109) —
     # see the GET/PUT variants above for the failure modes a string match hits.
-    conditions = db.execute(
-        select(ExperimentalConditions)
-        .where(ExperimentalConditions.experiment_fk == exp.id)
-        .order_by(ExperimentalConditions.id)
-    ).scalars().first()
+    conditions = lowest_conditions(db, exp.id)
     if conditions is None:
         raise HTTPException(status_code=404, detail="Experiment not found")
-    additive = db.execute(
-        select(ChemicalAdditive)
-        .where(ChemicalAdditive.experiment_id == conditions.id)
-        .where(ChemicalAdditive.compound_id == compound_id)
-    ).scalar_one_or_none()
+    additive = additive_service.find_additive(db, conditions.id, compound_id)
     if additive is None:
         raise HTTPException(status_code=404, detail="Additive not found")
-    compound = db.get(Compound, compound_id)
-    old_vals = {
-        "compound_id": compound_id,
-        "compound_name": compound.name if compound else None,
-        "amount": additive.amount,
-        "unit": additive.unit.value if additive.unit else None,
-    }
-    db.delete(additive)
-    db.add(ModificationsLog(
-        experiment_id=experiment_id,
-        experiment_fk=exp.id,
-        modified_by=current_user.uid,
-        modification_type="delete",
-        modified_table="chemical_additives",
-        old_values=old_vals,
-        new_values=None,
-    ))
+    additive_service.delete_additive(db, additive, exp, current_user.email)
     db.commit()
     log.info("additive_deleted", experiment_id=experiment_id, compound_id=compound_id)
     return Response(status_code=204)
@@ -1293,19 +1386,9 @@ def set_experiment_background_ammonium(
     Updates background_ammonium_concentration_mM on all ScalarResults rows for the
     experiment and triggers recalculation of derived yield fields on each row.
     """
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
 
-    result_ids = db.execute(
-        select(ExperimentalResults.id).where(ExperimentalResults.experiment_fk == exp.id)
-    ).scalars().all()
-
-    scalars = db.execute(
-        select(ScalarResults).where(ScalarResults.result_id.in_(result_ids))
-    ).scalars().all()
+    scalars = scalars_for_experiment(db, exp.id)
 
     for scalar in scalars:
         scalar.background_ammonium_concentration_mM = payload.value
@@ -1359,6 +1442,8 @@ def export_experiment(
             db, experiment_id, exported_by=current_user.email)
     except experiment_export.ExportNotFound:
         raise HTTPException(status_code=404, detail="Experiment not found")
+    except experiment_export.ExportRejected as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
     return StreamingResponse(
         io.BytesIO(payload),
         media_type=experiment_export.XLSX_MIME,
@@ -1386,22 +1471,13 @@ def get_experiment(
     current_user: FirebaseUser = Depends(verify_firebase_token),
 ) -> ExperimentDetailResponse:
     """Get a single experiment with nested conditions, notes, and modifications."""
-    from database.models.conditions import ExperimentalConditions
     from database.models.experiments import ModificationsLog
     from backend.api.schemas.conditions import ConditionsResponse
 
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
 
     # .first(), not scalar_one_or_none(): tolerate a duplicate row (issue #109).
-    cond = db.execute(
-        select(ExperimentalConditions)
-        .where(ExperimentalConditions.experiment_fk == exp.id)
-        .order_by(ExperimentalConditions.id)
-    ).scalars().first()
+    cond = lowest_conditions(db, exp.id)
     notes = db.execute(
         select(ExperimentNotes)
         .where(ExperimentNotes.experiment_fk == exp.id)
@@ -1414,34 +1490,13 @@ def get_experiment(
     ).scalars().all()
 
     cond_dict = ConditionsResponse.model_validate(cond).model_dump() if cond else None
-    notes_list = [
-        {
-            "id": n.id,
-            "note_text": n.note_text,
-            "note_type": n.note_type.value,
-            "result_id": n.result_id,
-            "event_date": n.event_date.isoformat() if n.event_date else None,
-            "created_by": n.created_by,
-            "needs_review": n.needs_review,
-            "created_at": n.created_at.isoformat(),
-            "updated_at": n.updated_at.isoformat() if n.updated_at else None,
-        }
-        for n in notes
-    ]
-    mods_list = [
-        {
-            "id": m.id,
-            "modified_by": m.modified_by,
-            "modification_type": m.modification_type,
-            "modified_table": m.modified_table,
-            "old_values": m.old_values,
-            "new_values": m.new_values,
-            "created_at": m.created_at.isoformat(),
-        }
-        for m in mods
-    ]
     base = ExperimentResponse.model_validate(exp)
-    return ExperimentDetailResponse(**base.model_dump(), conditions=cond_dict, notes=notes_list, modifications=mods_list)
+    return ExperimentDetailResponse(
+        **base.model_dump(),
+        conditions=cond_dict,
+        notes=[NoteResponse.model_validate(n) for n in notes],
+        modifications=[ModificationResponse.model_validate(m) for m in mods],
+    )
 
 
 @router.post("", response_model=ExperimentResponse, status_code=201)
@@ -1512,11 +1567,7 @@ def update_experiment(
     """Update mutable fields on an experiment. If experiment_id is provided and differs
     from the path param, treats it as a rename: checks uniqueness, updates
     ExperimentalConditions.experiment_id, and writes a ModificationsLog entry."""
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
 
     data = payload.model_dump(exclude_unset=True)
     new_id = data.pop("experiment_id", None)
@@ -1532,7 +1583,7 @@ def update_experiment(
         db.add(ModificationsLog(
             experiment_id=exp.experiment_id,
             experiment_fk=exp.id,
-            modified_by=current_user.uid,
+            modified_by=current_user.email,
             modification_type="update",
             modified_table="experiments",
             old_values={"date": old_date.isoformat() if old_date else None},
@@ -1544,7 +1595,7 @@ def update_experiment(
         db.add(ModificationsLog(
             experiment_id=exp.experiment_id,
             experiment_fk=exp.id,
-            modified_by=current_user.uid,
+            modified_by=current_user.email,
             modification_type="update",
             modified_table="experiments",
             old_values={"is_outlier": old_is_outlier},
@@ -1557,7 +1608,7 @@ def update_experiment(
         db.add(ModificationsLog(
             experiment_id=exp.experiment_id,
             experiment_fk=exp.id,
-            modified_by=current_user.uid,
+            modified_by=current_user.email,
             modification_type="update",
             modified_table="experiments",
             old_values={"is_background": old_is_background},
@@ -1664,7 +1715,7 @@ def update_experiment(
             db.add(ModificationsLog(
                 experiment_id=new_id,
                 experiment_fk=exp.id,
-                modified_by=current_user.uid,
+                modified_by=current_user.email,
                 modification_type="update",
                 modified_table="experiments",
                 old_values={"experiment_id": experiment_id},
@@ -1680,29 +1731,20 @@ def update_experiment(
         exp.sample_id = new_sample_id
         db.flush()
         # .first(), not scalar_one_or_none(): tolerate a duplicate row (issue #109).
-        cond = db.execute(
-            select(ExperimentalConditions)
-            .where(ExperimentalConditions.experiment_fk == exp.id)
-            .order_by(ExperimentalConditions.id)
-        ).scalars().first()
+        cond = lowest_conditions(db, exp.id)
         if cond is not None:
+            # Cascades to every linked scalar (conditions_calcs.py).
             recalculate(cond, db)
             db.flush()
-        # Also recalculate scalars directly: conditions_calcs.py cascades to scalars via ORM
-        # relationships when conditions exist, but this explicit loop ensures scalars update
-        # even when there are no conditions (total_ferrous_iron_g stays NULL in that case).
-        result_ids = db.execute(
-            select(ExperimentalResults.id).where(ExperimentalResults.experiment_fk == exp.id)
-        ).scalars().all()
-        scalars = db.execute(
-            select(ScalarResults).where(ScalarResults.result_id.in_(result_ids))
-        ).scalars().all()
-        for scalar in scalars:
-            recalculate(scalar, db)
+        else:
+            # No conditions row, so no cascade: recalculate the scalars directly.
+            # (With conditions this loop repeated the cascade; issue #191, E-08.)
+            for scalar in scalars_for_experiment(db, exp.id):
+                recalculate(scalar, db)
         db.add(ModificationsLog(
             experiment_id=exp.experiment_id,
             experiment_fk=exp.id,
-            modified_by=current_user.uid,
+            modified_by=current_user.email,
             modification_type="update",
             modified_table="experiments",
             old_values={"sample_id": old_sample_id},
@@ -1745,11 +1787,7 @@ def get_experiment_delete_impact(
     Read-only; powers the confirmation dialog so it can show consequences
     instead of a generic warning. 404 if the experiment does not exist.
     """
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
     return _impact_to_response(collect_delete_impact(db, exp))
 
 
@@ -1768,11 +1806,7 @@ def delete_experiment(
     backend/services/experiment_deletion.py for why a bare db.delete() is not
     sufficient.
     """
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
 
     impact = delete_experiment_cascade(db, exp, modified_by=current_user.email)
     return ExperimentDeletedResponse(
@@ -1797,28 +1831,11 @@ def add_note(
     result ownership; the checks here only translate those into 422/409 with a
     readable message instead of a 500.
     """
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
 
     # Mirror of ck_note_scope, for the message.
-    if payload.note_type is NoteType.description and payload.result_id is not None:
-        raise HTTPException(
-            status_code=422,
-            detail="A 'description' note is experiment-level; do not pass result_id.",
-        )
-    if payload.note_type is NoteType.modification and payload.result_id is None and payload.event_date is None:
-        raise HTTPException(
-            status_code=422,
-            detail="A 'modification' note must be scoped to a result or carry an event_date.",
-        )
-    if payload.note_type is NoteType.result_note and payload.result_id is None:
-        raise HTTPException(
-            status_code=422,
-            detail="A 'result_note' note must name the result_id it describes.",
-        )
+    if notes_service.breaks_note_scope(payload.note_type, payload.result_id, payload.event_date):
+        raise HTTPException(status_code=422, detail=_ADD_SCOPE_DETAIL[payload.note_type])
     # Mirror of fk_note_result_same_experiment, for the message.
     if payload.result_id is not None:
         owner_fk = db.execute(
@@ -1868,11 +1885,7 @@ def patch_note(
     that changed. Retyping obeys the DB scope rules (mirrored here as 422) and
     the one-description index (409).
     """
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
     note = db.execute(
         select(ExperimentNotes)
         .where(ExperimentNotes.id == note_id)
@@ -1889,21 +1902,8 @@ def patch_note(
 
     # Mirror of ck_note_scope on the state AFTER this patch (issue #122 PR-B):
     # a retype and a date change can each remove a 'modification's only anchor.
-    if new_type is NoteType.description and note.result_id is not None:
-        raise HTTPException(
-            status_code=422,
-            detail="A result-scoped note cannot become the 'description'; it is experiment-level.",
-        )
-    if new_type is NoteType.modification and note.result_id is None and new_date is None:
-        raise HTTPException(
-            status_code=422,
-            detail="A 'modification' note must be scoped to a result or carry an event_date.",
-        )
-    if new_type is NoteType.result_note and note.result_id is None:
-        raise HTTPException(
-            status_code=422,
-            detail="A 'result_note' note must be scoped to a result.",
-        )
+    if notes_service.breaks_note_scope(new_type, note.result_id, new_date):
+        raise HTTPException(status_code=422, detail=_PATCH_SCOPE_DETAIL[new_type])
 
     if payload.note_text is not None and payload.note_text != note.note_text:
         old_values["note_text"], new_values["note_text"] = note.note_text, payload.note_text
@@ -1960,11 +1960,7 @@ def delete_note(
     current_user: FirebaseUser = Depends(verify_firebase_token),
 ) -> Response:
     """Delete a note. Writes a ModificationsLog entry then removes the row."""
-    exp = db.execute(
-        select(Experiment).where(Experiment.experiment_id == experiment_id)
-    ).scalar_one_or_none()
-    if exp is None:
-        raise HTTPException(status_code=404, detail="Experiment not found")
+    exp = get_experiment_or_404(db, experiment_id)
     note = db.execute(
         select(ExperimentNotes)
         .where(ExperimentNotes.id == note_id)

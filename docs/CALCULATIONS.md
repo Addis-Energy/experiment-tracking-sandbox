@@ -9,11 +9,13 @@ in sync with the implementation after every change.
 
 ## How the Calculation Engine Works
 
-After any database write, M3 API endpoints call:
+After a write is flushed, and before the commit, API endpoints and services call:
 
 ```python
-from backend.services.calculations import registry
-registry.recalculate(instance, session)
+import backend.services.calculations  # noqa: F401  (registers the @register functions)
+from backend.services.calculations.registry import recalculate
+
+recalculate(instance, session)
 ```
 
 The registry dispatches to the correct formula function based on `type(instance)`.
@@ -24,6 +26,23 @@ To add a new formula:
 2. Decorate your function with `@registry.register(YourModel)`
 3. Import the module in `backend/services/calculations/__init__.py`
 4. Update this document
+
+**The conditions cascade (issue #191).** `recalculate_conditions` ends by recalculating every
+scalar row of the experiment, so a caller that has recalculated a conditions row must not
+loop over its scalars again. `PATCH /api/experiments/{id}` did that on a sample change and
+recalculated each scalar twice; it now recalculates scalars directly only when the
+experiment has no conditions row, where there is no cascade. The cascade loads all the
+scalar rows in one query before it starts. `recalculate_conditions_for_samples` reads each
+sample's FeO value once per call and wraps each experiment in a SAVEPOINT, so one failing
+row no longer stops the rest.
+
+**Constants (issue #190, sweep D-18).** Molar masses and the default background
+ammonium live in `backend/services/physical_constants.py`: `FE_MOLAR_MASS` (55.845),
+`FEO_MOLAR_MASS` (71.844), `H2_MOLAR_MASS` (2.01588), `NH4_MOLAR_MASS` (18.04) and
+`DEFAULT_BACKGROUND_AMMONIUM_MM` (0.2). Formula modules and services import them from
+there; do not write these numbers inline. The module sits outside the `calculations`
+package to avoid a circular import with `elemental_composition_service`. The SQL
+views keep their own copies of the H2 and Fe values, guarded by tests.
 
 **Cumulative time on hand-entered rows (issue #146).** `cumulative_time_post_reaction_days` is not a registry formula; `update_cumulative_times_for_chain` (`backend/services/result_merge_utils.py`) sets it. Since #146, hand-entered samples from the UI (`POST /api/experiments/{experiment_id}/results` and the Core Flood sample routes, both through `backend/services/result_entry_service.py`) always call it, so they get a cumulative time. Rows created with the older `POST /api/results` still get none. No formula changed.
 
@@ -365,10 +384,10 @@ mutation — and `calculate_ferrous_iron_yield_h2` returns NULL whenever this is
 taking `ferrous_iron_yield_h2_pct` and `ferrous_iron_yield_nh3_pct` down with it. Every
 path that recalculates:
 
-- `POST /api/conditions`, `PATCH /api/conditions/{id}` — `backend/api/routers/conditions.py:103`, `:125`
-- `PATCH /api/experiments/{id}` — `backend/api/routers/experiments.py:1329`
-- Replicate creation — `database/lineage_utils.py:603`
-- Any elemental upload, via `recalculate_conditions_for_samples()` (`backend/services/elemental_composition_service.py:34`) — this is what covers experiments created *before* their rock's FeO data arrived
+- `POST /api/conditions`, `PATCH /api/conditions/{id}` — `create_conditions` and `update_conditions` in `backend/api/routers/conditions.py`
+- `PATCH /api/experiments/{id}`, on a sample change — `update_experiment` in `backend/api/routers/experiments.py`
+- Replicate creation — `create_replicate_experiments` in `database/lineage_utils.py`
+- Any elemental upload, via `recalculate_conditions_for_samples()` (`backend/services/elemental_composition_service.py`) — this is what covers experiments created *before* their rock's FeO data arrived
 - The New Experiments bulk upload, as of 2026-08-10 — records every conditions row it touches and recalculates them in one pass before returning
 
 **Known gap — the recalculation is not surfaced in the UI.** The bulk uploader appends

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ExperimentIcp, IcpRow } from '@/api/icp'
 
@@ -26,7 +27,7 @@ beforeEach(() => {
 })
 
 describe('IcpSection (issue #143)', () => {
-  it('shows the chart with chips, All and log scale for a series with ICP', async () => {
+  it('opens expanded with the sample count and the chart, and collapses on click', async () => {
     const body: ExperimentIcp = {
       rows: [
         row({ result_id: 1, experiment_id: 'SERUM_010-t1' }),
@@ -36,13 +37,17 @@ describe('IcpSection (issue #143)', () => {
     }
     vi.mocked(experimentsApi.getIcp).mockResolvedValue(body)
     wrap(<IcpSection experimentId="SERUM_010-t3" />)
-    expect(await screen.findByRole('heading', { name: 'ICP over time' })).toBeInTheDocument()
+    const toggle = await screen.findByRole('button', { name: /^ICP over time/ })
     expect(experimentsApi.getIcp).toHaveBeenCalledWith('SERUM_010-t3')
-    expect(screen.getByText(/2 samples · 2 experiments/)).toBeInTheDocument()
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(toggle).toHaveTextContent('2 samples · 2 experiments in series')
     expect(screen.getByRole('button', { name: 'All' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Log scale' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Ca' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: 'Cu' })).toHaveAttribute('aria-pressed', 'false')
+    await userEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('button', { name: 'All' })).not.toBeInTheDocument()
   })
 
   it('renders nothing when the series has no ICP data', async () => {

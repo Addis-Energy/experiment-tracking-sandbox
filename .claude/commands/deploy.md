@@ -1,5 +1,5 @@
 ---
-description: Merge develop into origin/main and prepare for lab PC deployment. Run after /complete-task has merged the working branch into develop.
+description: Merge develop into origin/main; main then deploys to Azure nightly. Run after /complete-task has merged the working branch into develop.
 allowed-tools: Bash
 ---
 
@@ -9,14 +9,18 @@ You are executing a production deployment merge. Follow every step in order. Sto
 
 Before merging any branch whose migration can refuse to apply (e.g. a
 duplicate-data guard), confirm the required data cleanup has already been run
-on the lab PC. `update.ps1` Step 5 runs `alembic upgrade head`
-unconditionally on every nightly deploy and aborts the whole run — skipping
-Step 6's frontend rebuild — on a non-zero exit. If a pending migration's
+against production. The Azure deploy workflow runs `alembic upgrade head` on
+every deploy and fails on a non-zero exit. If a pending migration's
 pre-flight raises (e.g. a `RuntimeError` refusing to add a constraint while
-duplicate rows remain), the nightly deploy fails at Step 5 every night until
-the cleanup is applied on the lab PC. If this deploy includes such a
-migration, tell the user before continuing and confirm the cleanup script has
-been run on the lab PC first.
+duplicate rows remain), the nightly deploy fails every night until the
+cleanup is applied. If this deploy includes such a migration, tell the user
+before continuing and confirm the cleanup script has been run first. Pending
+data-fix/cleanup scripts run against Azure per
+`docs/deployment/AZURE_RUNBOOK.md` R4 (App Service SSH console).
+
+> Until the switch (2026-12-03) production is still the lab PC: run cleanup
+> scripts there, and `update.ps1` Step 5 runs the migration. This note is
+> retired 2026-12 (after the Azure switch).
 
 ## Step 1 — Pre-flight checks
 
@@ -96,11 +100,15 @@ Tell the user:
 
 > **origin/main is updated.**
 >
-> To deploy to the lab PC, right-click `update.ps1` and choose **Run with PowerShell**.
+> origin/main deploys to Azure nightly at 02:00 Eastern, or immediately by
+> running the **Deploy to Azure** workflow manually (GitHub Actions, Run workflow).
 >
-> To verify the update completed:
-> ```powershell
-> Get-Content "C:\Logs\experiment-tracker\updates.log" -Tail 20
-> ```
+> To verify: check the run with `gh run list --workflow "Deploy to Azure" --limit 3`
+> (or the Actions tab), then open `https://data.addisenergy.com/health`.
+> Rollback and troubleshooting: `docs/deployment/AZURE_RUNBOOK.md` R3.
 >
-> If the service does not restart automatically: `nssm restart ExperimentTracker`
+> **Until the switch (2026-12-03)** the lab PC is still production: right-click
+> `update.ps1` and choose **Run with PowerShell**, then check
+> `Get-Content "C:\Logs\experiment-tracker\updates.log" -Tail 20`; restart with
+> `nssm restart ExperimentTracker` if needed. Retired 2026-12 (after the Azure
+> switch).

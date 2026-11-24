@@ -25,8 +25,8 @@ If one vial of a replicate set is re-run, name it by appending a sequential numb
 
 The Experiments list has a **Group replicates** toggle (on by default). When on:
 
-- Lettered sets collapse into a single row for the parent, with a `▸` disclosure arrow.
-- Click the arrow to expand and see each lettered member indented underneath.
+- Lettered sets collapse into a single row for the parent, with a **group · N** flag beside the ID.
+- Click the flag to expand and see each lettered member indented underneath (hover it to see the letters). Clicking the row or the ID opens the group page.
 - Pagination counts collapsed groups as one row, so page size and totals stay stable
   as you expand/collapse — expanding a row never changes what page you're on.
 - Turn the toggle off to see every experiment row flat, one per line, as before.
@@ -62,10 +62,16 @@ sets are a/b/c, well under that cap.
 
 Every replicate group — including an orphan lettered set with no parent row — has its
 own page at `/experiments/groups/{base}` (e.g. `/experiments/groups/SERUM_001`). Reach
-it from the **Group {base}** link in the experiment detail header strip of any member.
+it from the **Group {base}** link in the experiment detail header strip of any member,
+or from the breadcrumb above the ID (**Experiments › Group SERUM_001 › SERUM_001a**).
 
-It shows:
+It shows, from the top (issue #160):
 
+- The cross-replicate **rollup chart** (mean ± std per timepoint) and its table — the
+  same data as the Grouped (n=N) mode on an individual member's Results tab. The
+  **Metric** select opens on **H₂ (g/t)**; a group with no g/t values (no rock mass,
+  such as a background set) opens on **H₂ (ppm)** instead. The legend sits above the
+  chart.
 - A **members table** — one row per replicate (the parent, if one exists, plus every
   lettered member), with status, outlier flag, and result count per row. Any condition
   that differs from the rest of the group (e.g. actual rock mass) is called out per row.
@@ -76,8 +82,6 @@ It shows:
   of repeated per row.
 - An **additive summary** — a single summary line if every member's additives agree, or
   a "varies" note if they don't.
-- The cross-replicate **rollup chart** (mean ± std per timepoint) — the same data as the
-  Grouped (n=N) mode on an individual member's Results tab.
 
 The page does not edit replicates: "Replicates are edited individually; only the H₂
 background is set here." Edit a replicate's conditions, additives, or results from its
@@ -89,7 +93,7 @@ base ID had no parent row — the common case for lettered-only replicate sets.
 
 ### H₂ background (Serum groups)
 
-Serum group pages have an **H₂ background** row in the header. **Set** (or **Change**) picks a blank serum experiment to subtract from this group's H₂, either the **whole group** (all its vials averaged) or **this vial only** (that vial and its `-t` vials). **Clear** removes the link after a confirmation. Once linked, the grouped results view adds **Net H₂ (µmol)**, **Net H₂ (g/t)** and **Net Fe²⁺ → H₂ (%)** with mean ± SD. Each timepoint uses the nearest background day: a warning chip shows the matched day when it differs, "≤ bkg" marks a mean below the background, and "no bkg match" means that bucket has no usable background. The default metric stays raw H₂ ppm, and stored H₂ values are never changed. Renaming the group or the background disconnects the link; set it again.
+Serum group pages have an **H₂ background** row in the header. **Set** (or **Change**) picks a blank serum experiment to subtract from this group's H₂, either the **whole group** (all its vials averaged) or **this vial only** (that vial and its `-t` vials). **Clear** removes the link after a confirmation. Once linked, the grouped results view adds **Net H₂ (µmol)**, **Net H₂ (g/t)** and **Net Fe²⁺ → H₂ (%)** with mean ± SD. Each timepoint uses the nearest background day: a warning chip shows the matched day when it differs, "≤ bkg" marks a mean below the background, and "no bkg match" means that bucket has no usable background. The default metric stays a raw (not net) value, H₂ (g/t) since issue #160, and stored H₂ values are never changed. Renaming the group or the background disconnects the link; set it again.
 
 ### Timepoint vials with no letters
 
@@ -98,7 +102,7 @@ An experiment sampled destructively at several timepoints but **not** replicated
 experiment, four vials. It gets a group page like any set:
 
 - On `/experiments` the four vials appear as **one row labelled `SERUM_pH_002`** with a
-  **4 vials** chip. Clicking it opens the group page (not the first vial). The status
+  **group · 4 vials** badge. Clicking the row opens the group page (not the first vial). The status
   dropdown is read-only on that row, because an inline change would reach only one vial.
 - The group page header reads **4 vials** rather than "0 replicates", lists every vial
   with its `T+N` timepoint and result count, and links each one to its own page.
