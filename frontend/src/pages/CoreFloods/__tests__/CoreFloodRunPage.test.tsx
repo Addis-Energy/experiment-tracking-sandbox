@@ -482,6 +482,22 @@ describe('CoreFloodRunPage', () => {
     expect(await screen.findByRole('dialog')).toBeInTheDocument()
   })
 
+  it('a run with segments but no samples shows the empty state, blank totals, and Add sample works (#139)', async () => {
+    vi.mocked(coreFloodsApi.get).mockResolvedValue({ ...RUN, samples: [] })
+    renderPage()
+    const main = await screen.findByRole('region', { name: 'Samples' })
+    expect(within(main).getByText('No samples yet')).toBeInTheDocument()
+
+    const totals = screen.getByRole('button', { name: /^Run totals/ })
+    expect(totals).toHaveTextContent('Cum. H₂ — g/t · Pore volumes —')
+    await userEvent.click(totals)
+    expect(screen.getByText('Cumulative H₂ to date').parentElement).not.toHaveTextContent(/\d/)
+    expect(screen.getByText('Pore volumes to date').parentElement).not.toHaveTextContent(/\d/)
+
+    await userEvent.click(screen.getByRole('button', { name: '+ Add sample' }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  })
+
   it('a non-variant sample row opens the modal in edit mode', async () => {
     renderPage()
     const main = await screen.findByRole('region', { name: 'Samples' })

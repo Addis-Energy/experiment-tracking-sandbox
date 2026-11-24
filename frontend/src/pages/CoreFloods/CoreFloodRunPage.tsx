@@ -113,6 +113,7 @@ export function CoreFloodRunPage() {
               kind="core-flood"
               onEdit={onEdit}
               icpByResult={icpByResult}
+              emptyText="No samples yet"
               segmentHref={segmentHref}
               markedExperimentId={marks.main}
               detailsExtra={scalarDetails}
