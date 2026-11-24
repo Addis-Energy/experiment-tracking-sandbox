@@ -287,3 +287,44 @@ def test_segment_id_of_a_core_flood_stays_404_and_names_the_sent_id(
         resp = client.get(path)
         assert resp.status_code == 404
         assert "HPHTC_002-3" in resp.json()["detail"]
+
+
+# ---- #145 criterion 3: run page and Results tab show the same sample ----
+
+def test_sample_entered_on_either_page_reads_the_same_on_both(client, db_session, reporting_views):
+    """Issue #145: an HPHT sample written from the run page shows on the segment's
+    Results tab with the same tube, result note and cumulative time, and an edit
+    from the Results tab shows on the run page. Both pages open ResultEntryModal,
+    so both write through POST/PATCH /api/experiments/{id}/results."""
+    root = _hpht(db_session, "HPHTP_001", date=_d(1), rock_mass_g=10.0)
+    _hpht(db_session, "HPHTP_001-2", status=ExperimentStatus.ONGOING, date=_d(8),
+          rock_mass_g=10.0)
+    _sample(db_session, root, 4.0, date=_d(5))
+    db_session.commit()
+
+    def run_page(result_id):
+        body = client.get("/api/hpht/HPHTP_001").json()
+        (s,) = [s for s in body["samples"] if s["result_id"] == result_id]
+        notes = [n["note_text"] for n in s["notes"] if n["note_type"] == "result_note"]
+        return s["sample_tube_number"], notes, s["cumulative_time_post_reaction_days"]
+
+    def results_tab(result_id):
+        rows = client.get("/api/experiments/HPHTP_001-2/results").json()
+        (r,) = [r for r in rows if r["id"] == result_id]
+        notes = [n["note_text"] for n in r["notes"] if n["note_type"] == "result_note"]
+        return r["sample_tube_number"], notes, r["cumulative_time_post_reaction_days"]
+
+    # Entered from the run page (day 2 of segment -2, which starts after the root's day 4).
+    resp = client.post("/api/experiments/HPHTP_001-2/results", json={
+        "measurement_date": "2026-10-10T12:00:00Z", "time_post_reaction_days": 2.0,
+        "sample_tube_number": 7, "result_note": "first gas draw",
+    })
+    assert resp.status_code == 201, resp.text
+    rid = resp.json()["id"]
+    assert run_page(rid) == results_tab(rid) == (7, ["first gas draw"], pytest.approx(6.0))
+
+    # Edited from the Results tab.
+    resp = client.patch(f"/api/experiments/HPHTP_001-2/results/{rid}",
+                        json={"sample_tube_number": 9, "result_note": "redrawn"})
+    assert resp.status_code == 200, resp.text
+    assert run_page(rid) == results_tab(rid) == (9, ["redrawn"], pytest.approx(6.0))

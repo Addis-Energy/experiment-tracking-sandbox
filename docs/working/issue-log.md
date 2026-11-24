@@ -3272,3 +3272,10 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Files changed:** `frontend/src/pages/CoreFloods/CoreFloodRunPage.tsx`, `frontend/src/pages/CoreFloods/__tests__/CoreFloodRunPage.test.tsx`, `docs/working/issue-log.md`
 - **Tests added:** yes, 1 (watched failing first). Full vitest: 81 files, 828 passed; lint and type-check exit 0.
 - **Decision logged:** no
+
+## 2026-11-24 | issue #146 / #145 — close out: Q6 in the Azure switch, run page / Results tab parity test (`chore/issue-146-azure-q6-check`)
+- **#146 pre-close step:** Q6 (`docs/issues/audit-queries.sql`) on the 2026-11-24 production backup (restored to dev the same day) returned 0 rows: no hand-entered primary sample lacks a cumulative time, so no backfill. Mat chose to repeat it on Azure, so it is now step **R2 5b** in `docs/deployment/AZURE_RUNBOOK.md`: read-only, inlined so nothing else in the audit file runs, expected `(0 rows)`, and any hit goes through R4 (not a rollback reason). The exact command was run against the dev copy: `(0 rows)`.
+- **#145 criteria:** all five sub-issues closed with #146; `tests/api/test_core_floods.py` unchanged and passing; Parr P03 behaviour pinned by `test_parr_p03_counts_in_parr_not_reactors_and_shows_parr_spec` and `test_status_ongoing_in_p03_ignores_r03_but_409s_on_p03`; run page / Results tab parity had no test, so `test_sample_entered_on_either_page_reads_the_same_on_both` was added (creates via the run-page path, edits via the Results-tab path, compares tube, result note and cumulative time on both reads; checked to fail when an expected value is wrong).
+- **Files changed:** `docs/deployment/AZURE_RUNBOOK.md` (+ `project_context` copy), `tests/api/test_hpht.py`, `docs/working/issue-log.md`
+- **Tests added:** yes, 1. Scoped suite: 1964 passed.
+- **Decision logged:** no (the Azure-check choice is in the runbook step and the #146 comment)
