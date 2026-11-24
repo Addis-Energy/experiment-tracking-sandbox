@@ -3249,3 +3249,11 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Files changed:** `docs/issues/audit-2026-11-09-navigation.md` (+ `docs/project_context/` copy), `docs/working/issue-log.md`
 - **Tests added:** no (docs only)
 - **Decision logged:** no
+
+## 2026-11-24 | issue #42 — Fe(II) % yield: close out; label the entered value (`feat/issue-42-fe-yield-display`)
+- **Audit:** H₂- and NH₃-derived yield are calculated and tested (`scalar_calcs.py`), cumulative H₂ yield is in `v_hpht_samples`, group means and export carry both. NH₃ yield is hidden from the UI on purpose (#92, H₂ focus), not a gap.
+- **What changed:** the DETAILS panel's old hand-entered `ferrous_iron_yield` was labelled "Fe(II)" beside the calculated "Fe²⁺ H₂ %"; it now reads "Fe²⁺ yield (entered): x %". User manual updated to match.
+- **Gaps left, all tracked:** #183 (Elemental create/delete never recalculates `total_ferrous_iron_g`), #197 (core floods: `v_core_flood_samples` omits Fe²⁺ yield).
+- **Files changed:** `frontend/src/components/results/ScalarExtras.tsx`, `frontend/src/pages/ExperimentDetail/__tests__/ResultsTab.columns.test.tsx`, `docs/user_guide/USER_MANUAL.md` (+ `project_context` copy), `docs/working/issue-log.md`
+- **Tests added:** no (one assertion updated; vitest ExperimentDetail, results, Hpht: 244 passed)
+- **Decision logged:** no

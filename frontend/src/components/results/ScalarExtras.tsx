@@ -3,7 +3,7 @@ import { resultsApi } from '@/api/results'
 import { Num, Spinner } from '@/components/ui'
 
 /** DETAILS extras of a sample: scalar values that are not table columns (DO and
- *  Fe(II)). Loaded when the section opens (the list payloads do not carry them).
+ *  the hand-entered Fe²⁺ yield). Loaded when the section opens (the list payloads do not carry them).
  *  Used by the Results tab and both run pages. */
 export function ScalarExtras({ resultId }: { resultId: number }) {
   const { data: scalar, isLoading } = useQuery({
@@ -14,7 +14,8 @@ export function ScalarExtras({ resultId }: { resultId: number }) {
   if (!scalar) return null
   const values = ([
     ['DO', scalar.final_dissolved_oxygen_mg_L, 'mg/L'],
-    ['Fe(II)', scalar.ferrous_iron_yield, ''],
+    // The hand-entered value, not the calculated Fe²⁺ H₂ % column (issue #42).
+    ['Fe²⁺ yield (entered)', scalar.ferrous_iron_yield, '%'],
   ] as const).filter(([, v]) => v != null)
   if (values.length === 0) return null
   return (
@@ -32,7 +33,7 @@ export function ScalarExtras({ resultId }: { resultId: number }) {
   )
 }
 
-/** A run page's `detailsExtra`: every sample's DETAILS can hold DO and Fe(II). */
+/** A run page's `detailsExtra`: every sample's DETAILS can hold DO and the entered Fe²⁺ yield. */
 export function scalarDetails(row: { resultId: number }) {
   return <ScalarExtras resultId={row.resultId} />
 }

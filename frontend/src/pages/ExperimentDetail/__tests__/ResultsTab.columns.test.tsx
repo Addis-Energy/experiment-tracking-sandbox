@@ -162,7 +162,7 @@ describe('ResultsTab — samples table (issue #163)', () => {
     expect(await screen.findByText('Scalar Results')).toBeInTheDocument()
     const details = screen.getByRole('region', { name: 'Sample details' })
     expect(details).toHaveTextContent('DO: 2.5 mg/L')
-    expect(details).toHaveTextContent('Fe(II): 0.4')
+    expect(details).toHaveTextContent('Fe²⁺ yield (entered): 0.4 %')
   })
 })
 
