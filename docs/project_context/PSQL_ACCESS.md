@@ -539,7 +539,7 @@ documented step by step in `docs/deployment/AZURE_RUNBOOK.md` (R1.2 and R1.4 for
 initial roles and grants, R5 for granting and revoking a person). In short:
 
 - `scripts/azure/roles.sql` creates `experiments_app` (owns the database and every
-  object in it), `reporting_reader` (NOLOGIN group role) and `experiments_backup`.
+  object in it), `reporting_reader` (NOLOGIN group role) and `lab_backup` (backup login, a member of `reporting_reader`).
 - `scripts/azure/grants.sql` runs as `experiments_app` after the restore.
 - `bash scripts/azure/grant_db_access.sh first.last <ipv4>` creates the person's login
   (`IN ROLE reporting_reader`) and an Azure firewall rule `researcher-first-last` for

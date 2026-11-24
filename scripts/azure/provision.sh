@@ -15,12 +15,14 @@ source <(tr -d '\r' < "${AZURE_ENV:-$HERE/azure.env}")
 : "${STORAGE:?}" "${PG_ADMIN_USER:?}" "${ADMIN_IP:?}" "${HQ_IP:?}"
 : "${ALERT_EMAILS:?}"
 BUDGET_USD="${BUDGET_USD:-150}"
-PLAN="${APP}-plan"
+# The portal-built app sits on a plan with a generated name; set PLAN in
+# azure.env or this creates a second, unused plan.
+PLAN="${PLAN:-${APP}-plan}"
 LAW="${APP}-logs"
 AG="${APP}-alerts"
 PHOTO_CONTAINER="sample-photos"
 # Single-quoted on purpose: ${PORT:-8000} must stay literal for App Service.
-STARTUP='uvicorn backend.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1'
+STARTUP='python -m uvicorn backend.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1'
 
 if [[ -z "${PG_ADMIN_PASSWORD:-}" ]]; then
   read -r -s -p "Postgres admin password: " PG_ADMIN_PASSWORD; echo
@@ -75,7 +77,7 @@ step "PostgreSQL Flexible Server 18"
 az postgres flexible-server show -g "$RG" -n "$PG" >/dev/null 2>&1 ||
   az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" \
     --version 18 --tier Burstable --sku-name Standard_B2s \
-    --backup-retention 35 --geo-redundant-backup Enabled \
+    --backup-retention 35 --geo-redundant-backup Disabled \
     --admin-user "$PG_ADMIN_USER" --admin-password "$PG_ADMIN_PASSWORD" \
     --public-access None --high-availability Disabled --yes -o none
 set_pg_param() {
