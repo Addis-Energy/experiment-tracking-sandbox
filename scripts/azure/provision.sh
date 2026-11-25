@@ -172,7 +172,9 @@ az monitor action-group create -g "$APP_RG" -n "$AG" --short-name addisalert \
   "${AG_ARGS[@]}" -o none
 AG_ID="$(azv monitor action-group show -g "$APP_RG" -n "$AG" --query id -o tsv)"
 
-# Heartbeat: fire when no blob write to heartbeat/labpc-backup in 36 h.
+# Heartbeat: fire when no blob write to heartbeat/labpc-backup in 48 h.
+# Azure only accepts fixed windows (24 h, 48 h, ...); 24 h would false-alarm
+# whenever a nightly backup finishes later than the night before.
 # Zero matching rows means count < 1, so the alert fires on silence.
 # Created disabled: no heartbeat is sent until the switch, so it would fire
 # from day one. The runbook enables it at R2 step 6. Re-running this script
@@ -182,10 +184,10 @@ HB_QUERY='StorageBlobLogs
 | where Uri contains "heartbeat/labpc-backup"'
 az monitor scheduled-query create -g "$APP_RG" -n labpc-backup-heartbeat \
   --scopes "$LAW_ID" --condition "count 'hb' < 1" \
-  --condition-query hb="$HB_QUERY" --window-size 36h \
+  --condition-query hb="$HB_QUERY" --window-size 48h \
   --evaluation-frequency 1h --severity 1 --action-groups "$AG_ID" \
   --skip-query-validation true --disabled true \
-  --description "No lab PC backup heartbeat in 36 hours" -o none
+  --description "No lab PC backup heartbeat in 48 hours" -o none
 
 # App availability: any 5xx in 15 min, and health check below 100%.
 az monitor metrics alert create -g "$APP_RG" -n "${APP}-http5xx" \

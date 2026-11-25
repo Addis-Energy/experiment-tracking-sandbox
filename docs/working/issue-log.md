@@ -3309,3 +3309,9 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Files changed:** `scripts/azure/{provision.sh,azure.env.example,grant_db_access.sh,revoke_db_access.sh}`, `.github/workflows/deploy-azure.yml`, `docs/deployment/AZURE_RUNBOOK.md`, `docs/superpowers/specs/2026-11-17-azure-migration-design.md`, `docs/working/decisions.md`
 - **Tests added:** no (scripts/workflow/docs; `bash -n`, workflow YAML parsed)
 - **Decision logged:** yes — decisions.md 2026-11-25
+
+## 2026-11-25 | inline (#196) — heartbeat alert window 48h (`fix/azure-heartbeat-window`)
+- **Why:** the first real `provision.sh` run failed at the heartbeat alert: Azure log alerts reject a 36 h window (it allows 24 h or 48 h, among others). Everything before that step completed. The rest (alerts, budget) ran from the fixed script tail. The budget still needs an interactive `az login` (RBAC "interactive authentication is needed").
+- **Files changed:** `scripts/azure/provision.sh`, `docs/deployment/AZURE_RUNBOOK.md`, `docs/superpowers/specs/2026-11-17-azure-migration-design.md`
+- **Tests added:** no — verified against Azure (alert created with a 2-day window, disabled)
+- **Decision logged:** no (window choice recorded in the spec §5.10)
