@@ -18,16 +18,26 @@ cp scripts/azure/azure.env.example scripts/azure/azure.env   # untracked; fill i
 source <(tr -d '\r' < scripts/azure/azure.env)   # strip CRs (Windows editors)
 export PGHOST="$PG.postgres.database.azure.com"
 export PGSSLMODE=require
-export AZ_RG="$RG" AZ_PG_SERVER="$PG" PGUSER="$PG_ADMIN_USER"   # used by R5
+export AZ_RG="$DB_RG" AZ_PG_SERVER="$PG" PGUSER="$PG_ADMIN_USER"   # used by R5
 az account set --subscription "$SUBSCRIPTION"
 # "Secure unique default hostname" is on: the app's address is
-# addisenergy-lab-<random>.eastus2-01.azurewebsites.net, NOT <APP>.azurewebsites.net.
-DEFAULT_HOST="$(az webapp show -g "$RG" -n "$APP" --query defaultHostName -o tsv | tr -d '\r')"
+# addisenergy-lab-<random>.eastus-01.azurewebsites.net, NOT <APP>.azurewebsites.net.
+DEFAULT_HOST="$(az webapp show -g "$APP_RG" -n "$APP" --query defaultHostName -o tsv | tr -d '\r')"
 echo "$DEFAULT_HOST"
 ```
 
 Wherever this runbook says `<default host>`, use that exact value. It is also
 the GoDaddy CNAME target and a Firebase authorized domain.
+
+**Two resource groups.** The app and the database live apart:
+- `$APP_RG` (`DataApplication-web`, East US): every `az webapp`, `appservice`,
+  `storage` and `monitor` command.
+- `$DB_RG` (`DataApplication`, East US 2): every `az postgres` command. R5's
+  `AZ_RG` is the DB group.
+
+Both regions are in Virginia: about 1 ms of extra latency between the app and
+the database, and a negligible inter-region transfer charge at this data volume.
+Accepted (spec §7).
 
 **Prerequisite for R1.** Do the local backup password prerequisite below *first*.
 Then: the branch carrying the Azure scripts (including
@@ -93,15 +103,19 @@ end of this section.
 
 ### R1.0 Provision
 
-**Already built in the portal (2026-11-24; spec §7):**
-- resource group `DataApplication` (East US 2)
-- server `addisenergy-db` (admin `addisadmin`), database `experiments` and its roles
-- web app `addisenergy-lab` on plan `ASP-DataApplication-965e`
+**Already built in the portal (2026-11-24/25; spec §7):**
+- resource group `DataApplication` (East US 2): server `addisenergy-db` (admin
+  `addisadmin`), database `experiments` and its roles
+- resource group `DataApplication-web` (East US): web app `addisenergy-lab` on
+  plan `ASP-DataApplicationweb-9034`, Application Insights `addisenergy-lab`
+- `DefaultResourceGroup-EUS`: a Log Analytics `DefaultWorkspace-...`, created
+  automatically by Application Insights. Leave it.
 
 `provision.sh` skips what exists and adds the rest: app config and settings,
 firewall rules, storage, monitoring, alerts and the budget. Copy
-`azure.env.example` as is for those names. **`PLAN` must be set**, or the script
-creates a second, billed App Service plan. Server settings fixed at creation
+`azure.env.example` as is for those names. It stops with an error if `azure.env`
+still has the old single `RG`/`LOCATION`, or if the app is on a plan other than
+`PLAN`. It never creates a plan for an existing app. Server settings fixed at creation
 (Burstable B2s, 35-day retention, geo-redundant backup *off*, public access plus
 private endpoints) are not changed by the script.
 
@@ -131,9 +145,13 @@ private endpoints) are not changed by the script.
      \"issuer\": \"https://token.actions.githubusercontent.com\",
      \"subject\": \"repo:$GH_REPO_PATH:ref:refs/heads/main\",
      \"audiences\": [\"api://AzureADTokenExchange\"]}"
-   RG_ID="$(az group show -n "$RG" --query id -o tsv | tr -d '\r')"
-   az role assignment create --role Contributor --scope "$RG_ID" \
-     --assignee-object-id "$SP_ID" --assignee-principal-type ServicePrincipal
+   # Contributor on BOTH groups: the app group for the deploy, the DB group for
+   # the temporary firewall rule around migrations.
+   for g in "$APP_RG" "$DB_RG"; do
+     RG_ID="$(az group show -n "$g" --query id -o tsv | tr -d '\r')"
+     az role assignment create --role Contributor --scope "$RG_ID" \
+       --assignee-object-id "$SP_ID" --assignee-principal-type ServicePrincipal
+   done
    ```
    Then the GitHub side. The names must match `.github/workflows/deploy-azure.yml`
    exactly. `gh secret set NAME` prompts for the value (nothing on the command
@@ -148,20 +166,22 @@ private endpoints) are not changed by the script.
    gh secret set AZURE_DATABASE_URL "${R[@]}"     # experiments_app, sslmode=require
    for n in API_KEY AUTH_DOMAIN PROJECT_ID STORAGE_BUCKET MESSAGING_SENDER_ID APP_ID
    do gh secret set "VITE_FIREBASE_$n" "${R[@]}"; done
-   gh variable set AZURE_RG --body "$RG" "${R[@]}"
+   gh variable set AZURE_APP_RG --body "$APP_RG" "${R[@]}"
+   gh variable set AZURE_DB_RG --body "$DB_RG" "${R[@]}"
    gh variable set AZURE_APP --body "$APP" "${R[@]}"
    gh variable set AZURE_PG_SERVER --body "$PG" "${R[@]}"
    gh secret list "${R[@]}"; gh variable list "${R[@]}"
    ```
    Expected: 10 secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-   `AZURE_SUBSCRIPTION_ID`, `AZURE_DATABASE_URL`, six `VITE_FIREBASE_*`) and 3
-   variables (`AZURE_RG`, `AZURE_APP`, `AZURE_PG_SERVER`).
+   `AZURE_SUBSCRIPTION_ID`, `AZURE_DATABASE_URL`, six `VITE_FIREBASE_*`) and 4
+   variables (`AZURE_APP_RG`, `AZURE_DB_RG`, `AZURE_APP`, `AZURE_PG_SERVER`).
    If this fails: the role assignment can take a few minutes to apply; a login
    error in the workflow usually means the federated subject does not match the
-   repo path exactly.
+   repo path exactly. An authorization error on the firewall step means the
+   Contributor assignment on the DB group is missing.
 3. Check the firewall:
    ```bash
-   az postgres flexible-server firewall-rule list -g "$RG" -n "$PG" -o table
+   az postgres flexible-server firewall-rule list -g "$DB_RG" -n "$PG" -o table
    ```
    Expected: `app-outbound-*` rules (one per App Service outbound IP), the admin IP and
    the HQ IP. No `0.0.0.0` / "Allow Azure services" rule.
@@ -172,10 +192,10 @@ private endpoints) are not changed by the script.
    identity and your login have Storage Blob Data Contributor on the storage account
    (the script does this; role assignments take a few minutes to apply).
 5. Confirm server parameters: `timezone` = `America/New_York`, `log_statement` =
-   `none`, backup retention 35 days, geo-redundant backup on.
+   `none`, backup retention 35 days, geo-redundant backup off.
    ```bash
-   az postgres flexible-server parameter show -g "$RG" -s "$PG" -n timezone -o table
-   az postgres flexible-server show -g "$RG" -n "$PG" \
+   az postgres flexible-server parameter show -g "$DB_RG" -s "$PG" -n timezone -o table
+   az postgres flexible-server show -g "$DB_RG" -n "$PG" \
      --query "{ver:version,ret:backup.backupRetentionDays,geo:backup.geoRedundantBackup}"
    ```
    Expected: `America/New_York`; version `18`, retention `35`, geo `Disabled`
@@ -183,8 +203,8 @@ private endpoints) are not changed by the script.
 6. First deploy: GitHub, Actions, "Deploy to Azure", Run workflow. Expected: the log
    shows migrations running and Oryx running `pip install`. Repo secrets
    `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_DATABASE_URL`
-   and the six `VITE_FIREBASE_*` must be set, plus repo variables `AZURE_RG`,
-   `AZURE_APP`, `AZURE_PG_SERVER` (step 2b).
+   and the six `VITE_FIREBASE_*` must be set, plus repo variables `AZURE_APP_RG`,
+   `AZURE_DB_RG`, `AZURE_APP`, `AZURE_PG_SERVER` (step 2b).
    If this fails: the GitHub federated credential subject must be exactly
    `repo:<org>/<repo>:ref:refs/heads/main` (the repo must already be in the Addis
    org). The very first deploy needs the empty-schema restore below first, so a
@@ -289,7 +309,7 @@ and every researcher login get it through membership.
 
 ### R1.5 Start the app; snapshot and diff
 
-1. Redeploy or restart the web app (`az webapp restart -g "$RG" -n "$APP"`). Open
+1. Redeploy or restart the web app (`az webapp restart -g "$APP_RG" -n "$APP"`). Open
    `https://<default host>` (Section 0). Expected: the sign-in page loads.
 2. Snapshot the lab PC (BEFORE), [PS] on the lab PC with `DATABASE_URL` set in the
    shell to the local DB:
@@ -386,7 +406,7 @@ shell-only env vars (never in a `.env`): `DATABASE_URL` (Azure, `experiments_app
 Views are dropped and recreated at app import time, owned by `experiments_app`. The
 default privileges must cover them.
 
-1. Restart the app: `az webapp restart -g "$RG" -n "$APP"`. Wait for it to be
+1. Restart the app: `az webapp restart -g "$APP_RG" -n "$APP"`. Wait for it to be
    healthy.
 2. Create a test researcher (R5), then connect as that login:
    ```bash
@@ -400,12 +420,12 @@ default privileges must cover them.
 
 1. Azure point-in-time restore to a scratch server:
    ```bash
-   az postgres flexible-server restore -g "$RG" -n "$PG-scratch" \
+   az postgres flexible-server restore -g "$DB_RG" -n "$PG-scratch" \
      --source-server "$PG" --restore-time "$(date -u -d '-15 min' +%FT%TZ)"
    ```
    Connect as `experiments_app` and count rows in `experiments`. Expected: matches
    Azure. Delete the scratch server when done:
-   `az postgres flexible-server delete -g "$RG" -n "$PG-scratch" --yes`.
+   `az postgres flexible-server delete -g "$DB_RG" -n "$PG-scratch" --yes`.
 2. Lab PC dump into a scratch database: [PS]
    ```powershell
    Remove-Item Env:PGSSLMODE -ErrorAction SilentlyContinue  # local server: no SSL
@@ -449,7 +469,7 @@ default privileges must cover them.
    days, so use an account-key SAS tied to a stored access policy on the
    `heartbeat` container. [bash]
    ```bash
-   KEY="$(az storage account keys list -g "$RG" -n "$STORAGE" \
+   KEY="$(az storage account keys list -g "$APP_RG" -n "$STORAGE" \
      --query '[0].value' -o tsv | tr -d '\r')"
    az storage container policy create --account-name "$STORAGE" \
      --account-key "$KEY" -c heartbeat -n labpc-heartbeat --permissions cw \
@@ -605,7 +625,7 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
    could write to the frozen DB, and R3 would overwrite those writes.
 3. **Final dump, restore, grants, photos, diff.**
    - Stop the Azure web app first, so nothing holds a connection to the rehearsal
-     database: `az webapp stop -g "$RG" -n "$APP"`.
+     database: `az webapp stop -g "$APP_RG" -n "$APP"`.
    - Then empty the target (the rehearsal copy is in `experiments`). [bash] as the
      admin, connected to `postgres`, with `PGPASSWORD` from a `read -rs` as in R1.2:
      ```bash
@@ -625,7 +645,7 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
      `AZURE_STORAGE_ACCOUNT_URL` all set (R1.5). Before the photo `--apply`, check
      the printed target is Azure (R1.6 step 3), and pass both `--map`s (R1.6 step
      1b).
-   - Start the web app: `az webapp start -g "$RG" -n "$APP"`.
+   - Start the web app: `az webapp start -g "$APP_RG" -n "$APP"`.
    Expected: `diff` prints `OK`.
    One exception: if the only problem `diff` reports is `unresolved photo ids: [...]`
    and every id listed was reviewed and signed off by Mat in the R1.13 record,
@@ -635,9 +655,9 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
    `data.addisenergy.com`, validate, then Add binding with an App Service Managed
    Certificate (SNI SSL). Or:
    ```bash
-   az webapp config hostname add -g "$RG" --webapp-name "$APP" \
+   az webapp config hostname add -g "$APP_RG" --webapp-name "$APP" \
      --hostname data.addisenergy.com
-   az webapp config ssl create -g "$RG" -n "$APP" --hostname data.addisenergy.com
+   az webapp config ssl create -g "$APP_RG" -n "$APP" --hostname data.addisenergy.com
    ```
    Then bind the issued certificate thumbprint with
    `az webapp config ssl bind --certificate-thumbprint <t> --ssl-type SNI`.
@@ -689,9 +709,9 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
    Then arm the heartbeat alert, which `provision.sh` created disabled so it would
    not fire before the switch. [bash]
    ```bash
-   az monitor scheduled-query update -g "$RG" -n labpc-backup-heartbeat \
+   az monitor scheduled-query update -g "$APP_RG" -n labpc-backup-heartbeat \
      --disabled false
-   az monitor scheduled-query show -g "$RG" -n labpc-backup-heartbeat \
+   az monitor scheduled-query show -g "$APP_RG" -n labpc-backup-heartbeat \
      --query enabled
    ```
    Expected: `true`. If tonight's backup does not send a heartbeat, the alert fires
@@ -715,7 +735,7 @@ up to the freeze; Azure may have newer data entered since. This carries it back.
    the dump is lost. Also disable the nightly deploy so it does not run against the
    stopped app:
    ```bash
-   az webapp stop -g "$RG" -n "$APP"
+   az webapp stop -g "$APP_RG" -n "$APP"
    gh workflow disable "Deploy to Azure"
    gh workflow list --all
    ```
@@ -769,7 +789,7 @@ up to the freeze; Azure may have newer data entered since. This carries it back.
    the local DB again; it then uses the `localhost:5432:experiments:postgres` line
    in the task account's `pgpass.conf` (Section 0 prerequisite), so check that line
    is still there. Disable the heartbeat alert too, since the lab PC stops sending
-   heartbeats: `az monitor scheduled-query update -g "$RG" -n
+   heartbeats: `az monitor scheduled-query update -g "$APP_RG" -n
    labpc-backup-heartbeat --disabled true`. No data needs re-entering.
 
 ---
@@ -789,7 +809,7 @@ preview at all and commit as soon as they run. Never assume; read each script fi
    `lab_backup`, run the R3 step 1 dump command to a dated file. Expected:
    exit 0 and a plausible file size.
 2. Open the console: portal, the web app, Development Tools, SSH (or
-   `az webapp ssh -g "$RG" -n "$APP"`).
+   `az webapp ssh -g "$APP_RG" -n "$APP"`).
 3. Get oriented. The SSH session may not have the app's Python environment active:
    ```bash
    ls /                          # look for /antenv

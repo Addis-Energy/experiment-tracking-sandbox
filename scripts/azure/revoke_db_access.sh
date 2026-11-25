@@ -4,7 +4,8 @@
 # Usage: revoke_db_access.sh <first.last>
 #
 # Required env vars: PGHOST, PGUSER (Azure admin), PGPASSWORD (or .pgpass),
-#   AZ_RG (resource group), AZ_PG_SERVER (flexible server name).
+#   AZ_RG (the DATABASE's resource group, DB_RG; the app is in another),
+#   AZ_PG_SERVER (flexible server name).
 # Optional: PGDATABASE (default experiments), PGSSLMODE (default require)
 set -euo pipefail
 

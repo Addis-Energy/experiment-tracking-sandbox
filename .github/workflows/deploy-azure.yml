@@ -12,8 +12,12 @@
 #   VITE_FIREBASE_STORAGE_BUCKET, VITE_FIREBASE_MESSAGING_SENDER_ID,
 #   VITE_FIREBASE_APP_ID  (baked into the frontend build)
 # Repository variables (not secret):
-#   AZURE_RG (resource group), AZURE_APP (web app name),
+#   AZURE_APP_RG (web app's resource group), AZURE_APP (web app name),
+#   AZURE_DB_RG (database's resource group),
 #   AZURE_PG_SERVER (PostgreSQL flexible server name)
+# The app and the database are in different resource groups (and regions), so
+# webapp commands use APP_RG and firewall commands use DB_RG. The deploy
+# identity needs Contributor on both groups.
 name: Deploy to Azure
 
 on:
@@ -34,7 +38,8 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
-      RG: ${{ vars.AZURE_RG }}
+      APP_RG: ${{ vars.AZURE_APP_RG }}
+      DB_RG: ${{ vars.AZURE_DB_RG }}
       APP: ${{ vars.AZURE_APP }}
       PG_SERVER: ${{ vars.AZURE_PG_SERVER }}
       FW_RULE: gh-runner-${{ github.run_id }}
@@ -54,7 +59,7 @@ jobs:
         id: check
         run: |
           deployed=$(az webapp config appsettings list \
-            --resource-group "$RG" --name "$APP" \
+            --resource-group "$APP_RG" --name "$APP" \
             --query "[?name=='DEPLOYED_SHA'].value" -o tsv)
           echo "Deployed: ${deployed:-none}; main: $GITHUB_SHA"
           if [ "$deployed" = "$GITHUB_SHA" ] \
@@ -105,7 +110,7 @@ jobs:
           ip=$(curl -fsS https://api.ipify.org)
           [ -n "$ip" ] || { echo "Could not determine runner IP"; exit 1; }
           az postgres flexible-server firewall-rule create \
-            --resource-group "$RG" --name "$PG_SERVER" \
+            --resource-group "$DB_RG" --name "$PG_SERVER" \
             --rule-name "$FW_RULE" \
             --start-ip-address "$ip" --end-ip-address "$ip"
 
@@ -124,7 +129,7 @@ jobs:
           && steps.fw_add.outcome != 'skipped'
         run: |
           az postgres flexible-server firewall-rule delete \
-            --resource-group "$RG" --name "$PG_SERVER" \
+            --resource-group "$DB_RG" --name "$PG_SERVER" \
             --rule-name "$FW_RULE" --yes \
             || echo "::warning::Could not delete firewall rule $FW_RULE"
 
@@ -143,11 +148,12 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         with:
           app-name: ${{ vars.AZURE_APP }}
+          resource-group-name: ${{ vars.AZURE_APP_RG }}
           package: deploy.zip
 
       - name: Record deployed commit
         if: steps.check.outputs.skip != 'true'
         run: |
           az webapp config appsettings set \
-            --resource-group "$RG" --name "$APP" \
+            --resource-group "$APP_RG" --name "$APP" \
             --settings DEPLOYED_SHA="$GITHUB_SHA" --output none

@@ -3296,3 +3296,16 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Files changed:** `frontend/src/components/runs/{MainSection.tsx,RunTabs.tsx,runView.ts,Collapsible.tsx}`, `frontend/src/pages/ExperimentDetail/{index.tsx,IcpSection.tsx}`, `frontend/src/pages/CoreFloods/CoreFloodRunPage.tsx`, `frontend/src/pages/Hpht/{HphtRunPage.tsx,ConditionsSummaryCard.tsx}`, five test files, `docs/user_guide/USER_MANUAL.md` (+ `project_context` copy), `docs/working/issue-log.md`
 - **Tests added:** yes, 8. Full vitest: 81 files, 836 passed; lint and type-check exit 0.
 - **Decision logged:** no
+
+## 2026-11-25 | inline (#196) — split Azure resource groups: app vs database (`fix/azure-split-resource-groups`)
+- **Why:** the web app was rebuilt in `DataApplication-web` (East US) because the B1 quota blocked it in `DataApplication` (East US 2, the database's group). Every script, the workflow and the runbook assumed one `RG`.
+- **What changed:**
+  - `provision.sh`: `APP_RG`/`APP_LOCATION` for app, plan, storage and monitoring; `DB_RG`/`DB_LOCATION` for Postgres and firewall. It stops with an error on the legacy `RG`/`LOCATION`; it creates groups only if missing; it never creates a plan for an existing app and refuses a `PLAN` mismatch; the budget covers both groups.
+  - `deploy-azure.yml`: `AZURE_APP_RG` (webapp settings and deploy, now passing `resource-group-name`) and `AZURE_DB_RG` (temporary firewall rule).
+  - `azure.env.example`: new names.
+  - Grant/revoke headers: `AZ_RG` is the DB group.
+  - Runbook: Section 0 `AZ_RG="$DB_RG"` plus a two-groups note; every command targets the right group; R1.0 as-built list; 2b gives Contributor on both groups and 4 variables; the default host ends `.eastus-01`; R1.0 step 5 text says geo-redundant backup off.
+  - Spec §4/§7 and `decisions.md` record the split.
+- **Files changed:** `scripts/azure/{provision.sh,azure.env.example,grant_db_access.sh,revoke_db_access.sh}`, `.github/workflows/deploy-azure.yml`, `docs/deployment/AZURE_RUNBOOK.md`, `docs/superpowers/specs/2026-11-17-azure-migration-design.md`, `docs/working/decisions.md`
+- **Tests added:** no (scripts/workflow/docs; `bash -n`, workflow YAML parsed)
+- **Decision logged:** yes — decisions.md 2026-11-25

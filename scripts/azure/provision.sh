@@ -11,12 +11,20 @@ export MSYS_NO_PATHCONV=1   # Git Bash on Windows must not rewrite /subscription
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source <(tr -d '\r' < "${AZURE_ENV:-$HERE/azure.env}")
-: "${SUBSCRIPTION:?}" "${RG:?}" "${LOCATION:?}" "${APP:?}" "${PG:?}"
+# The app and the database live in separate resource groups and regions
+# (B1 quota blocked the app in the database's group; see the spec §7).
+if [[ -n "${RG:-}${LOCATION:-}" && -z "${APP_RG:-}${DB_RG:-}" ]]; then
+  echo "azure.env sets RG/LOCATION, which are no longer used. Replace them with" \
+    "APP_RG, APP_LOCATION, DB_RG and DB_LOCATION (see azure.env.example)." >&2
+  exit 1
+fi
+: "${SUBSCRIPTION:?}" "${APP_RG:?}" "${APP_LOCATION:?}" "${DB_RG:?}"
+: "${DB_LOCATION:?}" "${APP:?}" "${PG:?}"
 : "${STORAGE:?}" "${PG_ADMIN_USER:?}" "${ADMIN_IP:?}" "${HQ_IP:?}"
 : "${ALERT_EMAILS:?}"
 BUDGET_USD="${BUDGET_USD:-150}"
 # The portal-built app sits on a plan with a generated name; set PLAN in
-# azure.env or this creates a second, unused plan.
+# azure.env. A plan is only ever created for a web app that doesn't exist yet.
 PLAN="${PLAN:-${APP}-plan}"
 LAW="${APP}-logs"
 AG="${APP}-alerts"
@@ -41,47 +49,64 @@ add_fw_rule() {  # name ip
   if [[ "$2" == 0.* ]]; then
     echo "refusing firewall rule $1 for $2" >&2; exit 1
   fi
-  az postgres flexible-server firewall-rule create -g "$RG" -n "$PG" \
+  az postgres flexible-server firewall-rule create -g "$DB_RG" -n "$PG" \
     --rule-name "$1" --start-ip-address "$2" --end-ip-address "$2" -o none
 }
 
-step "Resource group"
-az group create -n "$RG" -l "$LOCATION" -o none
+step "Resource groups"
+# Create a group only when it is missing; existing groups are left alone.
+ensure_rg() {  # name location
+  [[ "$(azv group exists -n "$1")" == "true" ]] ||
+    az group create -n "$1" -l "$2" -o none
+}
+ensure_rg "$APP_RG" "$APP_LOCATION"
+ensure_rg "$DB_RG" "$DB_LOCATION"
 
 step "App Service plan + web app"
-az appservice plan show -g "$RG" -n "$PLAN" >/dev/null 2>&1 ||
-  az appservice plan create -g "$RG" -n "$PLAN" -l "$LOCATION" --is-linux \
-    --sku B1 -o none
-az webapp show -g "$RG" -n "$APP" >/dev/null 2>&1 ||
-  az webapp create -g "$RG" -n "$APP" --plan "$PLAN" --runtime "PYTHON:3.13" \
+# An existing web app keeps whatever plan it is on: never create a plan for it.
+if az webapp show -g "$APP_RG" -n "$APP" >/dev/null 2>&1; then
+  cur_plan="$(azv webapp show -g "$APP_RG" -n "$APP" \
+    --query appServicePlanId -o tsv)"
+  if [[ "${cur_plan##*/}" != "$PLAN" ]]; then
+    echo "web app $APP is on plan ${cur_plan##*/}, not PLAN=$PLAN;" \
+      "fix PLAN in azure.env" >&2
+    exit 1
+  fi
+else
+  az appservice plan show -g "$APP_RG" -n "$PLAN" >/dev/null 2>&1 ||
+    az appservice plan create -g "$APP_RG" -n "$PLAN" -l "$APP_LOCATION" \
+      --is-linux --sku B1 -o none
+fi
+az webapp show -g "$APP_RG" -n "$APP" >/dev/null 2>&1 ||
+  az webapp create -g "$APP_RG" -n "$APP" --plan "$PLAN" --runtime "PYTHON:3.13" \
     -o none
-az webapp update -g "$RG" -n "$APP" --https-only true -o none
-az webapp identity assign -g "$RG" -n "$APP" -o none
-az webapp config set -g "$RG" -n "$APP" --min-tls-version 1.2 \
+az webapp update -g "$APP_RG" -n "$APP" --https-only true -o none
+az webapp identity assign -g "$APP_RG" -n "$APP" -o none
+az webapp config set -g "$APP_RG" -n "$APP" --min-tls-version 1.2 \
   --ftps-state Disabled --always-on true --startup-file "$STARTUP" \
   --generic-configurations '{"healthCheckPath": "/health"}' -o none
 # Disables both FTP and SCM basic-auth publishing credentials.
-az webapp update -g "$RG" -n "$APP" --basic-auth Disabled -o none
-az webapp config appsettings set -g "$RG" -n "$APP" -o none --settings \
+az webapp update -g "$APP_RG" -n "$APP" --basic-auth Disabled -o none
+az webapp config appsettings set -g "$APP_RG" -n "$APP" -o none --settings \
   TZ=America/New_York CORS_ORIGINS=https://data.addisenergy.com \
   PHOTO_STORAGE=blob \
   "AZURE_STORAGE_ACCOUNT_URL=https://${STORAGE}.blob.core.windows.net" \
   "AZURE_PHOTO_CONTAINER=$PHOTO_CONTAINER" \
   SCM_DO_BUILD_DURING_DEPLOYMENT=true
-APP_PRINCIPAL="$(azv webapp identity show -g "$RG" -n "$APP" \
+APP_PRINCIPAL="$(azv webapp identity show -g "$APP_RG" -n "$APP" \
   --query principalId -o tsv)"
-APP_ID="$(azv webapp show -g "$RG" -n "$APP" --query id -o tsv)"
+APP_ID="$(azv webapp show -g "$APP_RG" -n "$APP" --query id -o tsv)"
 
 step "PostgreSQL Flexible Server 18"
 # The admin password is passed as an argument at create time only.
-az postgres flexible-server show -g "$RG" -n "$PG" >/dev/null 2>&1 ||
-  az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" \
+az postgres flexible-server show -g "$DB_RG" -n "$PG" >/dev/null 2>&1 ||
+  az postgres flexible-server create -g "$DB_RG" -n "$PG" -l "$DB_LOCATION" \
     --version 18 --tier Burstable --sku-name Standard_B2s \
     --backup-retention 35 --geo-redundant-backup Disabled \
     --admin-user "$PG_ADMIN_USER" --admin-password "$PG_ADMIN_PASSWORD" \
     --public-access None --high-availability Disabled --yes -o none
 set_pg_param() {
-  az postgres flexible-server parameter set -g "$RG" --server-name "$PG" \
+  az postgres flexible-server parameter set -g "$DB_RG" --server-name "$PG" \
     --name "$1" --value "$2" -o none
 }
 set_pg_param timezone America/New_York
@@ -94,20 +119,20 @@ add_fw_rule hq "$HQ_IP"
 # Re-read each run; stale app-outbound-* rules from an old IP set are not
 # removed here (delete by hand if the plan moves scale units).
 n=0
-for ip in $(azv webapp show -g "$RG" -n "$APP" \
+for ip in $(azv webapp show -g "$APP_RG" -n "$APP" \
   --query possibleOutboundIpAddresses -o tsv | tr ',' ' '); do
   n=$((n + 1)); add_fw_rule "app-outbound-$n" "$ip"
 done
 
 step "Storage account + containers + RBAC"
-az storage account show -g "$RG" -n "$STORAGE" >/dev/null 2>&1 ||
-  az storage account create -g "$RG" -n "$STORAGE" -l "$LOCATION" \
+az storage account show -g "$APP_RG" -n "$STORAGE" >/dev/null 2>&1 ||
+  az storage account create -g "$APP_RG" -n "$STORAGE" -l "$APP_LOCATION" \
     --kind StorageV2 --sku Standard_LRS --allow-blob-public-access false \
     --min-tls-version TLS1_2 -o none
 # Shared-key access must stay enabled: the lab PC heartbeat uses an
 # account-key SAS bound to the labpc-heartbeat stored access policy (a
 # user-delegation SAS is capped at 7 days). Disabling shared keys breaks it.
-STORAGE_ID="$(azv storage account show -g "$RG" -n "$STORAGE" \
+STORAGE_ID="$(azv storage account show -g "$APP_RG" -n "$STORAGE" \
   --query id -o tsv)"
 assign_blob_role() {  # object-id principal-type
   az role assignment create --role "Storage Blob Data Contributor" \
@@ -128,10 +153,10 @@ for c in "$PHOTO_CONTAINER" heartbeat; do
 done
 
 step "Monitoring: Log Analytics, diagnostics, alerts"
-az monitor log-analytics workspace show -g "$RG" -n "$LAW" >/dev/null 2>&1 ||
-  az monitor log-analytics workspace create -g "$RG" -n "$LAW" -l "$LOCATION" \
+az monitor log-analytics workspace show -g "$APP_RG" -n "$LAW" >/dev/null 2>&1 ||
+  az monitor log-analytics workspace create -g "$APP_RG" -n "$LAW" -l "$APP_LOCATION" \
     -o none
-LAW_ID="$(azv monitor log-analytics workspace show -g "$RG" -n "$LAW" \
+LAW_ID="$(azv monitor log-analytics workspace show -g "$APP_RG" -n "$LAW" \
   --query id -o tsv)"
 # Blob logs live on the blobServices/default sub-resource, not the account.
 az monitor diagnostic-settings create -n blob-write-logs \
@@ -143,9 +168,9 @@ IFS=',' read -r -a EMAILS <<< "${ALERT_EMAILS// /}"
 for e in "${EMAILS[@]}"; do
   i=$((i + 1)); AG_ARGS+=(--action email "owner$i" "$e")
 done
-az monitor action-group create -g "$RG" -n "$AG" --short-name addisalert \
+az monitor action-group create -g "$APP_RG" -n "$AG" --short-name addisalert \
   "${AG_ARGS[@]}" -o none
-AG_ID="$(azv monitor action-group show -g "$RG" -n "$AG" --query id -o tsv)"
+AG_ID="$(azv monitor action-group show -g "$APP_RG" -n "$AG" --query id -o tsv)"
 
 # Heartbeat: fire when no blob write to heartbeat/labpc-backup in 36 h.
 # Zero matching rows means count < 1, so the alert fires on silence.
@@ -155,7 +180,7 @@ AG_ID="$(azv monitor action-group show -g "$RG" -n "$AG" --query id -o tsv)"
 HB_QUERY='StorageBlobLogs
 | where OperationName in ("PutBlob", "PutBlockList")
 | where Uri contains "heartbeat/labpc-backup"'
-az monitor scheduled-query create -g "$RG" -n labpc-backup-heartbeat \
+az monitor scheduled-query create -g "$APP_RG" -n labpc-backup-heartbeat \
   --scopes "$LAW_ID" --condition "count 'hb' < 1" \
   --condition-query hb="$HB_QUERY" --window-size 36h \
   --evaluation-frequency 1h --severity 1 --action-groups "$AG_ID" \
@@ -163,11 +188,11 @@ az monitor scheduled-query create -g "$RG" -n labpc-backup-heartbeat \
   --description "No lab PC backup heartbeat in 36 hours" -o none
 
 # App availability: any 5xx in 15 min, and health check below 100%.
-az monitor metrics alert create -g "$RG" -n "${APP}-http5xx" \
+az monitor metrics alert create -g "$APP_RG" -n "${APP}-http5xx" \
   --scopes "$APP_ID" --condition "total Http5xx > 0" \
   --window-size 15m --evaluation-frequency 5m --severity 2 \
   --action "$AG_ID" --description "App returned HTTP 5xx" -o none
-az monitor metrics alert create -g "$RG" -n "${APP}-health" \
+az monitor metrics alert create -g "$APP_RG" -n "${APP}-health" \
   --scopes "$APP_ID" --condition "avg HealthCheckStatus < 100" \
   --window-size 15m --evaluation-frequency 5m --severity 1 \
   --action "$AG_ID" --description "/health check failing" -o none
@@ -184,7 +209,7 @@ cat > "$BUDGET_FILE" <<JSON
  "timeGrain": "Monthly",
  "timePeriod": {"startDate": "$START", "endDate": "$END"},
  "filter": {"dimensions": {"name": "ResourceGroupName", "operator": "In",
-                           "values": ["$RG"]}},
+                           "values": ["$APP_RG", "$DB_RG"]}},
  "notifications": {
   "actual80": {"enabled": true, "operator": "GreaterThan", "threshold": 80,
                "thresholdType": "Actual", "contactEmails": $EMAIL_JSON},
@@ -199,7 +224,7 @@ az rest --method put -o none --body "@$BUDGET_FILE" --url "$BUDGET_URL"
 step "Done. Manual follow-up (never scripted)"
 cat <<MSG
 Set secrets by hand (values are NOT in this script):
-  az webapp config appsettings set -g $RG -n $APP --settings \\
+  az webapp config appsettings set -g $APP_RG -n $APP --settings \\
     DATABASE_URL='<database-url>' \\
     FIREBASE_PROJECT_ID='<project-id>' \\
     FIREBASE_PRIVATE_KEY='<private-key>' \\

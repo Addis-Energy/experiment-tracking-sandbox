@@ -968,3 +968,14 @@ Alembic `b8c4e2d7f9a1`; the 2026-09-08 entry above (dual-write).
 - **GitHub:** the repo moved to the Free `Addis-Energy` organization (2026-11-23) before any OIDC credential exists. The Team plan is only needed for protection rules or environments on a private repo.
 
 **Why:** these record a hand-built environment so a later rebuild, the rehearsal and the switch run against what actually exists, not against the first design.
+
+## 2026-11-25 — Azure app and database in separate resource groups and regions (#196)
+
+**Decision (Mat, 2026-11-25):** the web app `addisenergy-lab` lives in resource group `DataApplication-web` (East US), on plan `ASP-DataApplicationweb-9034`. The database `addisenergy-db` stays in `DataApplication` (East US 2). The first plan `ASP-DataApplication-965e` no longer exists. Application Insights auto-created a Log Analytics `DefaultWorkspace-...` in `DefaultResourceGroup-EUS`. This supersedes the 2026-11-24 entry's "East US 2 for everything".
+
+- **Configuration:** `provision.sh`, `azure.env.example` and the runbook use `APP_RG`/`APP_LOCATION` (web app, plan, storage, monitoring, alerts) and `DB_RG`/`DB_LOCATION` (Postgres server, parameters, firewall). `provision.sh` refuses the old single `RG`/`LOCATION`, creates neither group if it exists, and never creates a plan for an existing app.
+- **Deploy:** GitHub variables `AZURE_APP_RG` and `AZURE_DB_RG` replace `AZURE_RG`. The OIDC deploy identity gets Contributor on both groups.
+- **Researcher access:** `AZ_RG` in the grant/revoke scripts is the DB group.
+- **Budget:** filters on both groups.
+
+**Why:** the B1 App Service quota blocked the app in the database's group. Both regions are in Virginia, so the cost is about 1 ms of extra latency and a negligible inter-region transfer charge, which Mat accepted rather than moving the database.
