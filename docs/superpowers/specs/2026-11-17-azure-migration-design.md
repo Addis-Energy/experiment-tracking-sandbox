@@ -63,7 +63,7 @@ In Mat's words, the failure to avoid on the first morning is **"data missing or 
   - Steps: create a free GitHub organization for Addis, with Mat and a second admin; transfer the repo; update `origin` on the dev machines and the lab PC. GitHub redirects the old URL, but don't rely on that.
   - Re-check what the transfer can drop: the CI workflow (`frontend-checks.yml`), branch protection and secrets.
   - The deploy workflow and its secrets are created only in the new location.
-- **Region:** **East US 2** (as built). East US was the first choice, but Azure refused PostgreSQL Flexible Server there ("subscription not allowed to provision in East US"), a capacity restriction on new subscriptions. Every resource sits in East US 2 so the app and database share a region.
+- **Region:** **East US 2** (as built). East US was the first choice, but Azure refused PostgreSQL Flexible Server there ("subscription not allowed to provision in East US"), a capacity restriction on new subscriptions. The database is in **East US 2**. The **app is in East US** in its own resource group (2026-11-25): the B1 App Service quota blocked it in the database's group. Both regions are in Virginia, so the cost is about 1 ms of extra latency and a negligible inter-region transfer charge. Accepted (§7).
 - **Locked components** (`docs/LOCKED_COMPONENTS.md`): models, alembic history, bulk-upload parsers, enums and Firebase auth must not change. The timezone fix (§5.2) is settings only for that reason. The photo storage change touches `backend/api/routers/samples.py` and settings only, not the models.
 - **Packages:**
   - `azure-storage-blob` is already listed in `requirements.txt:80`, unpinned and unused. It gets pinned.
@@ -174,7 +174,7 @@ Rough cost: about $66/month list as built (§7): Postgres about $53, App Service
   - `TZ=America/New_York`
   - the photo storage backend and Blob settings
 - `ENABLE_API_DOCS` is **not** set.
-- Firebase Auth authorized domains: add `data.addisenergy.com` and the app's exact default hostname. "Secure unique default hostname" is on, so that is `addisenergy-lab-<random>.eastus2-01.azurewebsites.net`, not `addisenergy-lab.azurewebsites.net` (§7).
+- Firebase Auth authorized domains: add `data.addisenergy.com` and the app's exact default hostname. "Secure unique default hostname" is on, so that is `addisenergy-lab-<random>.eastus-01.azurewebsites.net`, not `addisenergy-lab.azurewebsites.net` (§7).
 
 ### 5.6 Backups
 
@@ -239,7 +239,21 @@ Each alert emails Mat and the second owner.
 
 Mat created the core resources by hand in the Azure portal. This section records what exists. It never records passwords, connection strings, subscription or object IDs, or IP addresses. `scripts/azure/provision.sh` converges the rest against these names (`azure.env.example` carries them); see the runbook R1.0.
 
-**Subscription and region.** Pay-As-You-Go subscription "Azure subscription 1", resource group `DataApplication`, region **East US 2** (§4).
+**Subscription, resource groups and regions.** Pay-As-You-Go subscription "Azure subscription 1".
+
+| Resource group | Region | Holds |
+|---|---|---|
+| `DataApplication` | East US 2 | the PostgreSQL server |
+| `DataApplication-web` | East US | the web app, its plan and Application Insights; storage, alerts and Log Analytics from `provision.sh` go here too |
+| `DefaultResourceGroup-EUS` | East US | a `DefaultWorkspace-...` Log Analytics workspace, auto-created by Application Insights |
+
+**Why two groups (2026-11-25):** the B1 App Service quota blocked creating the app in `DataApplication`. The app was rebuilt in its own group in East US, and the first plan (`ASP-DataApplication-965e`) no longer exists. The split carries through everything:
+- Scripts and the runbook use `APP_RG`/`APP_LOCATION` for app-side commands and `DB_RG`/`DB_LOCATION` for Postgres.
+- The deploy workflow reads the GitHub variables `AZURE_APP_RG` and `AZURE_DB_RG`.
+- The deploy identity gets Contributor on both groups.
+- The budget covers both groups.
+
+App to database adds about 1 ms of latency (both regions are in Virginia), and the inter-region transfer is negligible at this volume.
 
 **PostgreSQL Flexible Server `addisenergy-db`** (`addisenergy-db.postgres.database.azure.com`)
 
@@ -267,8 +281,8 @@ The portal wizard defaulted to General Purpose D4ds_v5 with HA and Premium SSD v
 - After each restore, once: `GRANT SELECT ON ALL TABLES` and `ON ALL SEQUENCES IN SCHEMA public TO reporting_reader` (`grants.sql`).
 
 **App Service `addisenergy-lab`**
-- Linux, Python 3.13, Basic B1 (1.75 GB), plan `ASP-DataApplication-965e`, East US 2, about $12.41/month. Application Insights is on (`addisenergy-lab`).
-- **Secure unique default hostname** is on. The default address is `addisenergy-lab-<random>.eastus2-01.azurewebsites.net`, not `addisenergy-lab.azurewebsites.net`. That exact host is the GoDaddy CNAME target and a Firebase authorized domain.
+- Linux, Python 3.13, Basic B1 (1.75 GB), plan `ASP-DataApplicationweb-9034`, resource group `DataApplication-web`, East US, about $12.41/month. Application Insights is on (`addisenergy-lab`).
+- **Secure unique default hostname** is on. The default address is `addisenergy-lab-<random>.eastus-01.azurewebsites.net`, not `addisenergy-lab.azurewebsites.net`. That exact host is the GoDaddy CNAME target and a Firebase authorized domain.
 - Basic-auth publishing is disabled. The portal's continuous deployment is **not** enabled: its generated workflow neither builds the frontend nor runs migrations, so `.github/workflows/deploy-azure.yml` is used instead.
 
 **GitHub.** The repo was transferred to `Addis-Energy/experiment-tracking-sandbox` (Free organization) on 2026-11-23, before any OIDC credential exists.

@@ -8,7 +8,7 @@
 #   PGHOST      server FQDN
 #   PGUSER      Azure admin login
 #   PGPASSWORD  admin password (or use a .pgpass file)
-#   AZ_RG       resource group
+#   AZ_RG       the DATABASE's resource group (DB_RG; the app is in another)
 #   AZ_PG_SERVER  flexible server name (not FQDN)
 # Optional: PGDATABASE (default experiments), PGSSLMODE (default require)
 set -euo pipefail
