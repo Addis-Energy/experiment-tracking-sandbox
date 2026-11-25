@@ -1,17 +1,20 @@
 import type { ReactNode } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { experimentsApi } from '@/api/experiments'
+import { experimentsApi, type ExperimentDetail } from '@/api/experiments'
 import { conditionsApi } from '@/api/conditions'
 import { PageSpinner } from '@/components/ui'
 import { ConditionsTab } from '@/pages/ExperimentDetail/ConditionsTab'
 import { NotesTab } from '@/pages/ExperimentDetail/NotesTab'
 import { AnalysisTab } from '@/pages/ExperimentDetail/AnalysisTab'
 import { ModificationsTab } from '@/pages/ExperimentDetail/ModificationsTab'
-import { RUN_TABS, RUN_TAB_LABEL, runViewSearch, type RunView } from './runView'
+import { MainSection, PANEL, TAB_BAR, TabContent, useTabScroll } from './MainSection'
+import { RUN_TABS, RUN_TAB_LABEL, runViewSearch, showsMain, type RunView } from './runView'
 
-/** The run page's tab bar and content. Results is the run-level node the page
- *  passes in; the other tabs belong to the selected segment. */
+/** The run page's tab bar and content. Main stacks the run-level results node the
+ *  page passes in with the selected segment's conditions and XRD; the Results,
+ *  Conditions and XRD tabs scroll to their section of it. Notes and Entry Logs are
+ *  the selected segment's, each a view of its own. */
 export function RunTabs({ view, results }: { view: RunView; results: ReactNode }) {
   const [params] = useSearchParams()
   const id = view.segmentId
@@ -28,14 +31,26 @@ export function RunTabs({ view, results }: { view: RunView; results: ReactNode }
     retry: false,
   })
 
+  // Wait for the conditions: they sit above XRD, so loading them moves it.
+  useTabScroll(view.tab, (Boolean(experiment) || experimentFailed) && !conditionsPending)
+
   const count = (tab: string): number =>
     tab === 'notes' ? experiment?.notes.length ?? 0
       : tab === 'logs' ? experiment?.modifications.length ?? 0
         : 0
 
+  /** A card for part of the selected segment's record, once the segment has loaded. */
+  const record = (render: (segment: ExperimentDetail) => ReactNode) => (
+    <div className={PANEL}>
+      {experimentFailed && !experiment ? (
+        <p className="text-sm text-red-400 p-4">Could not load {id}.</p>
+      ) : !experiment ? <PageSpinner /> : render(experiment)}
+    </div>
+  )
+
   return (
     <div className="space-y-4">
-      <div className="border-b border-surface-border flex gap-0">
+      <div {...TAB_BAR}>
         {RUN_TABS.map((tab) => {
           const active = view.tab === tab
           const n = count(tab)
@@ -60,30 +75,31 @@ export function RunTabs({ view, results }: { view: RunView; results: ReactNode }
         })}
       </div>
 
-      {view.tab === 'results' ? results : (
-        <>
+      {showsMain(view.tab) ? (
+        <TabContent className="space-y-6">
+          <MainSection tab="results">{results}</MainSection>
+          <MainSection tab="conditions" heading={`Conditions of ${id}`}>
+            {record((segment) => (conditionsPending ? <PageSpinner /> : (
+              // key: an open edit form must never survive a change of segment.
+              <ConditionsTab key={id} conditions={conditions ?? null} experimentId={id} experimentFk={segment.id} />
+            )))}
+          </MainSection>
+          <MainSection tab="xrd" heading={`XRD of ${id}`}>
+            {record(() => <AnalysisTab key={id} experimentId={id} />)}
+          </MainSection>
+        </TabContent>
+      ) : (
+        <TabContent className="space-y-4">
           <p className="text-xs text-ink-muted">
             {RUN_TAB_LABEL[view.tab]} of {id}
           </p>
-          <div className="bg-surface-card border border-surface-border rounded-lg overflow-hidden">
-            {experimentFailed && !experiment ? (
-              <p className="text-sm text-red-400 p-4">Could not load {id}.</p>
-            ) : !experiment ? <PageSpinner /> : (
-              <>
-                {view.tab === 'conditions' && (conditionsPending ? <PageSpinner /> : (
-                  // key: an open edit form must never survive a change of segment.
-                  <ConditionsTab key={id} conditions={conditions ?? null} experimentId={id} experimentFk={experiment.id} />
-                ))}
-                {view.tab === 'notes' && (
-                  // key: a draft must never survive a change of segment.
-                  <NotesTab key={id} experimentId={id} notes={experiment.notes} />
-                )}
-                {view.tab === 'logs' && <ModificationsTab modifications={experiment.modifications} />}
-                {view.tab === 'xrd' && <AnalysisTab key={id} experimentId={id} />}
-              </>
-            )}
-          </div>
-        </>
+          {record((segment) => (view.tab === 'notes' ? (
+            // key: a draft must never survive a change of segment.
+            <NotesTab key={id} experimentId={id} notes={segment.notes} />
+          ) : (
+            <ModificationsTab modifications={segment.modifications} />
+          )))}
+        </TabContent>
       )}
     </div>
   )

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes, useLocation, useNavigationType } from 'react-router-dom'
@@ -123,21 +123,65 @@ describe('experiment detail ?tab= (issue #162)', () => {
     ['?tab=xrd', 'XRD'],
     ['?tab=logs', 'Entry Logs'],
     ['?tab=conditions', 'Conditions'],
-    ['?tab=bogus', 'Results'],
-    ['', 'Results'],
+    ['?tab=bogus', 'Main'],
+    ['', 'Main'],
   ])('%s opens %s', async (query, tab) => {
     renderAt(`/experiments/SERUM_050${query}`)
     expect(await activeTab()).toEqual([tab])
   })
 
-  it('lists the tabs in order: Results first', async () => {
+  it('lists the tabs in order: Main first, then its sections', async () => {
     renderAt('/experiments/SERUM_050')
     await activeTab()
-    const labels = ['Results', 'Conditions', 'Notes', 'XRD', 'Entry Logs']
+    const labels = ['Main', 'Results', 'Conditions', 'XRD', 'Notes', 'Entry Logs']
     const buttons = screen.getAllByRole('button').map((b) => b.textContent ?? '')
     const positions = labels.map((l) => buttons.findIndex((t) => t.startsWith(l)))
     expect(positions.every((i) => i >= 0)).toBe(true)
     expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+  })
+
+  it('Main shows Results, Conditions and XRD together; Notes and Entry Logs do not', async () => {
+    renderAt('/experiments/SERUM_050')
+    const results = await screen.findByRole('button', { name: '+ Add Results' })
+    const conditions = screen.getByText('No conditions recorded for this experiment.')
+    const xrd = await screen.findByText('No external analyses linked')
+    expect(results.compareDocumentPosition(conditions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(conditions.compareDocumentPosition(xrd) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    await userEvent.click(screen.getByRole('button', { name: /^notes/i }))
+    expect(screen.queryByRole('button', { name: '+ Add Results' })).toBeNull()
+    expect(screen.queryByText('No conditions recorded for this experiment.')).toBeNull()
+  })
+
+  it('a section tab scrolls Main to its section, again on a second click, and from Notes', async () => {
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    try {
+      renderAt('/experiments/SERUM_050')
+      await activeTab()
+      expect(scroll).not.toHaveBeenCalled()
+
+      const conditions = screen.getByRole('button', { name: 'Conditions' })
+      await userEvent.click(conditions)
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1))
+      expect((scroll.mock.instances[0] as HTMLElement).id).toBe('section-conditions')
+      expect(screen.getByTestId('probe').dataset.search).toBe('?tab=conditions')
+
+      await userEvent.click(conditions)
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2))
+
+      await userEvent.click(screen.getByRole('button', { name: /^notes/i }))
+      await userEvent.click(screen.getByRole('button', { name: 'XRD' }))
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(3))
+      expect((scroll.mock.instances[2] as HTMLElement).id).toBe('section-xrd')
+
+      // Main clears ?tab= and does not scroll.
+      await userEvent.click(screen.getByRole('button', { name: 'Main' }))
+      expect(screen.getByTestId('probe').dataset.search).toBe('')
+      expect(scroll).toHaveBeenCalledTimes(3)
+    } finally {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    }
   })
 
   it('opens the Results tab content for ?tab=results', async () => {

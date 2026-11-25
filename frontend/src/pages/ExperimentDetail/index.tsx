@@ -7,45 +7,31 @@ import { experimentHomePath } from '@/utils/experimentId'
 import { ExperimentBreadcrumb, GroupStrip } from '@/components/experiments/RunContextHeader'
 import { ExperimentRecordHeader } from '@/components/experiments/ExperimentRecordHeader'
 import { isInReplicateSet, runKindFor } from '@/components/experiments/runContext'
+import { MainSection, PANEL, TAB_BAR, TabContent, useTabScroll } from '@/components/runs/MainSection'
+import { RUN_TABS, RUN_TAB_LABEL, parseTab, showsMain, type RunTab } from '@/components/runs/runView'
 import { ConditionsTab } from './ConditionsTab'
 import { ResultsTab } from './ResultsTab'
 import { NotesTab } from './NotesTab'
 import { ModificationsTab } from './ModificationsTab'
 import { AnalysisTab } from './AnalysisTab'
 
-// 'XRD' renders AnalysisTab (XRD phases and external analyses); relabelled in issue #143.
-const TABS = ['Results', 'Conditions', 'Notes', 'XRD', 'Entry Logs'] as const
-type Tab = typeof TABS[number]
-
-/** `?tab=` values (issue #162). Links use these, e.g. SegmentLink's `tab`. */
-const TAB_PARAM: Record<Tab, string> = {
-  Conditions: 'conditions',
-  Results: 'results',
-  Notes: 'notes',
-  XRD: 'xrd',
-  'Entry Logs': 'logs',
-}
-
-/** The tab named by `?tab=` (case-insensitive); Results when absent or unknown. */
-function tabFromParam(value: string | null): Tab {
-  const wanted = value?.toLowerCase()
-  return TABS.find((t) => TAB_PARAM[t] === wanted) ?? 'Results'
-}
-
-/** Full experiment detail page with tabbed navigation (Results, Conditions, XRD, Notes, Modifications). */
+/** Experiment detail page. Main stacks the Results, Conditions and XRD sections
+ *  (XRD renders AnalysisTab: XRD phases and external analyses, issue #143); their
+ *  tabs scroll to them. Notes and Entry Logs are tabs of their own. */
 export function ExperimentDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  // The active tab lives in the URL so a link can open a tab (issue #162).
-  // Switching replaces the history entry, so Back leaves the page instead of
-  // stepping through tabs.
+  // The active tab lives in the URL so a link can open a tab (issue #162), with
+  // the run pages' `?tab=` values. Switching replaces the history entry, so Back
+  // leaves the page instead of stepping through tabs.
   const [searchParams, setSearchParams] = useSearchParams()
-  const activeTab = tabFromParam(searchParams.get('tab'))
-  const setActiveTab = (tab: Tab) =>
+  const activeTab = parseTab(searchParams.get('tab'))
+  const setActiveTab = (tab: RunTab) =>
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev)
-        next.set('tab', TAB_PARAM[tab])
+        if (tab === 'main') next.delete('tab')
+        else next.set('tab', tab)
         return next
       },
       { replace: true },
@@ -104,7 +90,10 @@ export function ExperimentDetailPage() {
 
   // Hold the spinner until a fetch made after mount has settled, unless the cached
   // run already contains the experiment (then the redirect needs no refetch).
-  if (isLoading || conditionsLoading || runLoading || (runFetching && !inRun)) return <PageSpinner />
+  const loading = isLoading || conditionsLoading || runLoading || (runFetching && !inRun)
+  useTabScroll(activeTab, !loading)
+
+  if (loading) return <PageSpinner />
   if (error || !experiment) {
     return (
       <div className="space-y-2 p-6">
@@ -166,8 +155,8 @@ export function ExperimentDetailPage() {
 
 
       {/* Tab bar */}
-      <div className="border-b border-surface-border flex gap-0">
-        {TABS.map((tab) => (
+      <div {...TAB_BAR}>
+        {RUN_TABS.map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -178,13 +167,13 @@ export function ExperimentDetailPage() {
                 : 'border-transparent text-ink-muted hover:text-ink-secondary'
             }`}
           >
-            {tab}
-            {tab === 'Notes' && experiment.notes.length > 0 && (
+            {RUN_TAB_LABEL[tab]}
+            {tab === 'notes' && experiment.notes.length > 0 && (
               <span className="ml-1.5 text-[10px] bg-surface-raised rounded px-1">
                 {experiment.notes.length}
               </span>
             )}
-            {tab === 'Entry Logs' && experiment.modifications.length > 0 && (
+            {tab === 'logs' && experiment.modifications.length > 0 && (
               <span className="ml-1.5 text-[10px] bg-surface-raised rounded px-1">
                 {experiment.modifications.length}
               </span>
@@ -194,29 +183,41 @@ export function ExperimentDetailPage() {
       </div>
 
       {/* Tab content */}
-      <div className="bg-surface-card border border-surface-border rounded-lg overflow-hidden">
-        {activeTab === 'Conditions' && (
-          <ConditionsTab conditions={conditions ?? null} experimentId={id!} experimentFk={experiment.id} />
-        )}
-        {activeTab === 'Results' && (
-          <ResultsTab
-            experimentId={id!}
-            experimentFk={experiment.id}
-            idTimepointDays={experiment.id_timepoint_days}
-            experimentType={conditions?.experiment_type ?? null}
-            experimentStart={experiment.date}
-            baseExperimentId={experiment.base_experiment_id}
-          />
-        )}
-        {activeTab === 'Notes' && (
-          // key={id}: a draft must never survive navigation to another experiment.
-          <NotesTab key={id} experimentId={id!} notes={experiment.notes} />
-        )}
-        {activeTab === 'Entry Logs' && (
-          <ModificationsTab modifications={experiment.modifications} />
-        )}
-        {activeTab === 'XRD' && <AnalysisTab experimentId={id!} />}
-      </div>
+      {showsMain(activeTab) ? (
+        <TabContent className="space-y-6">
+          <MainSection tab="results" heading="Results">
+            <div className={PANEL}>
+              <ResultsTab
+                experimentId={id!}
+                experimentFk={experiment.id}
+                idTimepointDays={experiment.id_timepoint_days}
+                experimentType={conditions?.experiment_type ?? null}
+                experimentStart={experiment.date}
+                baseExperimentId={experiment.base_experiment_id}
+              />
+            </div>
+          </MainSection>
+          <MainSection tab="conditions" heading="Conditions">
+            <div className={PANEL}>
+              <ConditionsTab conditions={conditions ?? null} experimentId={id!} experimentFk={experiment.id} />
+            </div>
+          </MainSection>
+          <MainSection tab="xrd" heading="XRD">
+            <div className={PANEL}>
+              <AnalysisTab experimentId={id!} />
+            </div>
+          </MainSection>
+        </TabContent>
+      ) : (
+        <TabContent className={PANEL}>
+          {activeTab === 'notes' ? (
+            // key={id}: a draft must never survive navigation to another experiment.
+            <NotesTab key={id} experimentId={id!} notes={experiment.notes} />
+          ) : (
+            <ModificationsTab modifications={experiment.modifications} />
+          )}
+        </TabContent>
+      )}
     </div>
   )
 }

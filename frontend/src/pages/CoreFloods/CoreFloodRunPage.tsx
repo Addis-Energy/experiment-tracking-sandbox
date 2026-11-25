@@ -137,7 +137,6 @@ export function CoreFloodRunPage() {
         <Collapsible
           title="ICP over time"
           summary={`${icpRows.length} ${icpRows.length === 1 ? 'sample' : 'samples'}`}
-          defaultOpen
         >
           <IcpChart rows={icpRows} markers={segmentStarts(run.samples)} />
         </Collapsible>
@@ -145,11 +144,10 @@ export function CoreFloodRunPage() {
 
       {side.length > 0 && (
         <Collapsible
-          // key: picking a side sample opens the section on its marked row.
+          // key: picking a side sample reopens the section on its marked row.
           key={marks.side ?? 'none'}
           title="Side samples"
           summary={`${side.length} (blanks, bypass)`}
-          defaultOpen={marks.side !== undefined}
         >
           <RunSamplesTable
             rows={[...side].reverse().map(fromCoreFlood)}

@@ -222,17 +222,18 @@ describe('CoreFloodRunPage', () => {
     expect(await screen.findByText('Export downloaded')).toBeInTheDocument()
   })
 
-  it('side samples collapsed', async () => {
+  it('side samples open by default, and collapse', async () => {
     renderPage()
     const toggle = await screen.findByRole('button', { name: /^Side samples/ })
-    expect(toggle).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByText('CF_020-5_Bypass1', { selector: 'td' })).not.toBeInTheDocument()
-    await userEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
     const region = screen.getByRole('region', { name: 'Side samples' })
     expect(within(region).getByText('CF_020-5_Bypass1')).toBeInTheDocument()
     // the variant is not in the main samples table
     const main = screen.getByRole('region', { name: 'Samples' })
     expect(within(main).queryByText('CF_020-5_Bypass1')).not.toBeInTheDocument()
+    await userEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('region', { name: 'Side samples' })).not.toBeInTheDocument()
   })
 
   it('header shows run description, rig and ongoing segment', async () => {
@@ -246,24 +247,21 @@ describe('CoreFloodRunPage', () => {
     expect(within(badge).getByRole('link', { name: 'CF_020-2' })).toHaveAttribute('href', '/core-floods/CF_020?segment=CF_020-2')
   })
 
-  it('samples table comes before the other sections; Segments open for several segments', async () => {
+  it('samples table comes before the other sections; every section is open', async () => {
     renderPage()
     const main = await screen.findByRole('region', { name: 'Samples' })
     const seg = screen.getByRole('button', { name: /^Segments/ })
     expect(main.compareDocumentPosition(seg) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(seg).toHaveAttribute('aria-expanded', 'true')
-    for (const name of [/^Side samples/, /^Run totals/]) {
-      expect(screen.getByRole('button', { name })).toHaveAttribute('aria-expanded', 'false')
+    for (const name of [/^Segments/, /^Side samples/, /^Run totals/]) {
+      expect(screen.getByRole('button', { name })).toHaveAttribute('aria-expanded', 'true')
     }
     expect(screen.queryByRole('button', { name: /^Data checks/ })).not.toBeInTheDocument()
-    expect(screen.queryByText('Cumulative H₂ to date')).not.toBeInTheDocument()
   })
 
-  it('run totals collapsed by default and show cumulative H₂ when opened', async () => {
+  it('run totals open by default and show cumulative H₂', async () => {
     renderPage()
     const toggle = await screen.findByRole('button', { name: /^Run totals/ })
     expect(toggle).toHaveTextContent('Cum. H₂ 42.1 g/t · Pore volumes 1.2')
-    await userEvent.click(toggle)
     const label = screen.getByText('Cumulative H₂ to date')
     expect(label.parentElement).toHaveTextContent('42.1')
     expect(screen.getByText('Pore volumes to date').parentElement).toHaveTextContent('1.2')
@@ -288,7 +286,6 @@ describe('CoreFloodRunPage', () => {
 
     await userEvent.click(seg)
     expect(seg).toHaveAttribute('aria-expanded', 'false')
-    await userEvent.click(screen.getByRole('button', { name: /^Data checks/ }))
     await userEvent.click(screen.getByRole('button', { name: 'Rename CF_020-2' }))
     expect(seg).toHaveAttribute('aria-expanded', 'true')
   })
@@ -386,7 +383,6 @@ describe('CoreFloodRunPage', () => {
     const seg = await screen.findByRole('button', { name: /^Segments/ })
     await userEvent.click(seg)
     expect(seg).toHaveAttribute('aria-expanded', 'false')
-    await userEvent.click(screen.getByRole('button', { name: /^Data checks/ }))
     await userEvent.click(screen.getByRole('button', { name: 'Describe CF_020-2' }))
     expect(seg).toHaveAttribute('aria-expanded', 'true')
   })
@@ -490,7 +486,6 @@ describe('CoreFloodRunPage', () => {
 
     const totals = screen.getByRole('button', { name: /^Run totals/ })
     expect(totals).toHaveTextContent('Cum. H₂ — g/t · Pore volumes —')
-    await userEvent.click(totals)
     expect(screen.getByText('Cumulative H₂ to date').parentElement).not.toHaveTextContent(/\d/)
     expect(screen.getByText('Pore volumes to date').parentElement).not.toHaveTextContent(/\d/)
 
@@ -745,14 +740,17 @@ describe('one page per run', () => {
 
   it('marks the selected segment rows and shows the whole run', async () => {
     await renderRun('/core-floods/CF_020?segment=CF_020-2')
-    const rows = screen.getAllByTestId(/^sample-/)
+    // Side samples are open too, so count the main table only.
+    const rows = within(screen.getByRole('region', { name: 'Samples' })).getAllByTestId(/^sample-/)
     expect(rows.length).toBe(MAIN_SAMPLE_COUNT)
     expect(rows.filter((r) => r.dataset.marked === 'true').length).toBe(SEGMENT_2_SAMPLE_COUNT)
   })
 
   it('only=1 narrows the table to the segment', async () => {
     await renderRun('/core-floods/CF_020?segment=CF_020-2&only=1')
-    expect(screen.getAllByTestId(/^sample-/).length).toBe(SEGMENT_2_SAMPLE_COUNT)
+    expect(
+      within(screen.getByRole('region', { name: 'Samples' })).getAllByTestId(/^sample-/).length,
+    ).toBe(SEGMENT_2_SAMPLE_COUNT)
   })
 
   it('the notes tab shows the selected segment notes, not the samples', async () => {
@@ -896,8 +894,7 @@ describe('one page per run', () => {
         '/core-floods/CF_020',
         withWarnings([{ code: 'missing_description', experiment_ids: ['CF_020'] }], [segment({ description: null })]),
       )
-      await userEvent.click(await screen.findByRole('button', { name: /^Data checks/ }))
-      await userEvent.click(screen.getByRole('button', { name: 'Describe CF_020' }))
+      await userEvent.click(await screen.findByRole('button', { name: 'Describe CF_020' }))
       expect(scroll).toHaveBeenCalled()
       expect(screen.queryByRole('button', { name: /^Segments/ })).not.toBeInTheDocument()
     } finally {

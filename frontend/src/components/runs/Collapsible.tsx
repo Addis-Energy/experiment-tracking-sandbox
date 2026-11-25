@@ -16,8 +16,9 @@ interface Props {
 
 const BUTTON = 'flex items-center gap-3 py-3 text-left'
 
-/** A card section with a button header; children are unmounted while closed. */
-export function Collapsible({ title, summary, links, defaultOpen = false, open, onOpenChange, children }: Props) {
+/** A card section with a button header, open unless told otherwise; children are
+ *  unmounted while closed. */
+export function Collapsible({ title, summary, links, defaultOpen = true, open, onOpenChange, children }: Props) {
   const [inner, setInner] = useState(defaultOpen)
   const isOpen = open ?? inner
   const toggle = () => {
