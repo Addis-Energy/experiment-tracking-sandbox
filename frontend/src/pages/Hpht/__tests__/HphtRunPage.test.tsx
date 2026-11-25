@@ -185,8 +185,7 @@ describe('HphtRunPage (issue #150)', () => {
     renderPage()
     const region = await samplesRegion()
     expect(within(region).queryByTestId('sample-13')).not.toBeInTheDocument()
-    expect(screen.queryByText('Desorption draw')).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: /^Side samples/ }))
+    // Open by default, like every section.
     const side = screen.getByRole('region', { name: 'Side samples' })
     expect(within(side).getByTestId('sample-13')).toHaveTextContent('Desorption draw')
     // Raw values only: no running-total columns.
@@ -234,7 +233,7 @@ describe('HphtRunPage (issue #150)', () => {
 
   it('renders a base_mismatch warning under Data checks', async () => {
     renderPage({ ...RUN, warnings: [{ code: 'base_mismatch', experiment_ids: ['HPHT_2970'] }] })
-    await userEvent.click(await screen.findByRole('button', { name: /^Data checks/ }))
+    expect(await screen.findByRole('button', { name: /^Data checks/ })).toHaveAttribute('aria-expanded', 'true')
     const line = screen.getByTestId('warning-base_mismatch')
     expect(line).toHaveTextContent('HPHT_2970 does not follow the run')
     expect(line).toHaveTextContent('HPHT_297')
@@ -375,14 +374,15 @@ describe('one page per run', () => {
 
   it('marks the selected segment rows and shows the whole run', async () => {
     await renderRun('/hpht/HPHT_297?segment=HPHT_297-2')
-    const rows = screen.getAllByTestId(/^sample-/)
+    // Side samples are open too, so count the main table only.
+    const rows = within(await samplesRegion()).getAllByTestId(/^sample-/)
     expect(rows.length).toBe(MAIN_SAMPLE_COUNT)
     expect(rows.filter((r) => r.dataset.marked === 'true').length).toBe(SEGMENT_2_SAMPLE_COUNT)
   })
 
   it('only=1 narrows the table to the segment', async () => {
     await renderRun('/hpht/HPHT_297?segment=HPHT_297-2&only=1')
-    expect(screen.getAllByTestId(/^sample-/).length).toBe(SEGMENT_2_SAMPLE_COUNT)
+    expect(within(await samplesRegion()).getAllByTestId(/^sample-/).length).toBe(SEGMENT_2_SAMPLE_COUNT)
   })
 
   it('no rows are marked when the run is opened without a segment', async () => {
@@ -490,8 +490,7 @@ describe('final review fixes', () => {
         { code: 'base_mismatch', experiment_ids: ['HPHT_304'] },
       ],
     })
-    await userEvent.click(await screen.findByRole('button', { name: /^Data checks/ }))
-    const missing = screen.getByTestId('warning-missing_description')
+    const missing = await screen.findByTestId('warning-missing_description')
     expect(missing).toHaveTextContent('No description on HPHT_304. Add one under the ID above.')
     expect(missing).not.toHaveTextContent(/Segments/)
     const mismatch = screen.getByTestId('warning-base_mismatch')
@@ -501,8 +500,7 @@ describe('final review fixes', () => {
 
   it('F2: data checks on a multi-segment run still point at Segments', async () => {
     renderPage({ ...RUN, warnings: [{ code: 'missing_description', experiment_ids: ['HPHT_297-2'] }] })
-    await userEvent.click(await screen.findByRole('button', { name: /^Data checks/ }))
-    expect(screen.getByTestId('warning-missing_description')).toHaveTextContent('Add one in Segments.')
+    expect(await screen.findByTestId('warning-missing_description')).toHaveTextContent('Add one in Segments.')
   })
 
   it('F3: a selected side sample is marked in Side samples, and only=1 is ignored', async () => {

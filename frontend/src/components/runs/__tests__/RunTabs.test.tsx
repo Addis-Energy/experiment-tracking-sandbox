@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -19,7 +19,7 @@ import type { RunView } from '../runView'
 import { RunTabs } from '../RunTabs'
 
 const view = (over: Partial<RunView> = {}): RunView => ({
-  tab: 'results', segmentId: 'HPHT_297', explicit: false, only: false, ...over,
+  tab: 'main', segmentId: 'HPHT_297', explicit: false, only: false, ...over,
 })
 
 const note = (id: number) => ({ id, note_type: 'observation', note_text: `n${id}`, created_by: null })
@@ -54,9 +54,50 @@ beforeEach(() => {
 })
 
 describe('RunTabs', () => {
-  it('shows the results node on the results tab', () => {
-    renderTabs(view({ tab: 'results' }), <p>RESULTS</p>)
-    expect(screen.getByText('RESULTS')).toBeInTheDocument()
+  it('Main stacks results, the segment conditions and XRD, in that order', async () => {
+    renderTabs(view({ segmentId: 'HPHT_297-2' }), <p>RESULTS</p>)
+    const results = screen.getByText('RESULTS')
+    const conditions = await screen.findByText('No conditions recorded for this experiment.')
+    const xrd = await screen.findByText('No external analyses linked')
+    expect(results.compareDocumentPosition(conditions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(conditions.compareDocumentPosition(xrd) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText('XRD of HPHT_297-2')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Main' })).toHaveAttribute('aria-current', 'page')
+  })
+
+  it('lists the tabs in order: Main, the three sections, then Notes and Entry Logs', () => {
+    renderTabs(view(), null)
+    expect(screen.getAllByRole('link').map((a) => a.textContent)).toEqual(
+      ['Main', 'Results', 'Conditions', 'XRD', 'Notes', 'Entry Logs'],
+    )
+  })
+
+  describe('section tabs scroll Main to their section', () => {
+    const scroll = vi.fn()
+    beforeEach(() => {
+      scroll.mockReset()
+      Element.prototype.scrollIntoView = scroll
+    })
+    afterEach(() => {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    })
+
+    it.each(['results', 'conditions', 'xrd'] as const)('%s shows Main and scrolls to its section', async (tab) => {
+      renderTabs(view({ tab, segmentId: 'HPHT_297-2' }), <p>RESULTS</p>)
+      expect(screen.getByText('RESULTS')).toBeInTheDocument()
+      await waitFor(() => expect(scroll).toHaveBeenCalled())
+      expect((scroll.mock.instances[0] as HTMLElement).id).toBe(`section-${tab}`)
+      expect(screen.getByRole('link', { name: new RegExp(`^${tab}$`, 'i') })).toHaveAttribute('aria-current', 'page')
+    })
+
+    it('Main itself, Notes and Entry Logs never scroll', async () => {
+      for (const tab of ['main', 'notes', 'logs'] as const) {
+        const { unmount } = renderTabs(view({ tab, segmentId: 'HPHT_297-2' }), null)
+        await screen.findByRole('link', { name: /Notes\s*4/ })
+        unmount()
+      }
+      expect(scroll).not.toHaveBeenCalled()
+    })
   })
 
   it('loads the selected segment for the notes tab and counts its notes on the tab', async () => {
@@ -90,9 +131,10 @@ describe('RunTabs', () => {
     expect(await screen.findByText('No conditions recorded for this experiment.')).toBeInTheDocument()
   })
 
-  it('links each tab by ?tab= and omits it for results', async () => {
-    renderTabs(view({ tab: 'results', segmentId: 'HPHT_297-2' }), null)
-    expect(screen.getByRole('link', { name: /^Results/ })).toHaveAttribute('href', '/hpht/HPHT_297')
+  it('links each tab by ?tab= and omits it for Main', async () => {
+    renderTabs(view({ segmentId: 'HPHT_297-2' }), null)
+    expect(screen.getByRole('link', { name: 'Main' })).toHaveAttribute('href', '/hpht/HPHT_297')
+    expect(screen.getByRole('link', { name: /^Results/ })).toHaveAttribute('href', '/hpht/HPHT_297?tab=results')
     expect(screen.getByRole('link', { name: /^XRD/ })).toHaveAttribute('href', '/hpht/HPHT_297?tab=xrd')
     expect(await screen.findByRole('link', { name: /Notes\s*4/ })).toHaveAttribute('href', '/hpht/HPHT_297?tab=notes')
   })

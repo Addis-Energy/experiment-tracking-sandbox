@@ -3279,3 +3279,20 @@ pinned `/{experiment_id}/replicate-group` wrapper are all untouched.
 - **Files changed:** `docs/deployment/AZURE_RUNBOOK.md` (+ `project_context` copy), `tests/api/test_hpht.py`, `docs/working/issue-log.md`
 - **Tests added:** yes, 1. Scoped suite: 1964 passed.
 - **Decision logged:** no (the Azure-check choice is in the runbook step and the #146 comment)
+
+## 2026-11-25 | inline — Main tab with section tabs on experiment and run pages (`feat/main-tab-section-nav`)
+- **Why:** Mat asked for the first tab ("Results", which already showed nearly everything) to be called Main, for the other tabs to scroll to their part of it, for every section to start open, and for Notes and Entry Logs to stay separate so the page does not get too long. Applies to standalone experiments, HPHT runs and core floods.
+- **What changed:**
+  - Tabs are now Main, Results, Conditions, XRD, Notes, Entry Logs (`runView.ts`, shared by the detail page and `RunTabs`). Main stacks Results, Conditions and XRD; the three section tabs open Main and scroll to their section (`MainSection.tsx`: `MainSection`, `TabContent`, `useTabScroll`). Notes and Entry Logs are still their own views.
+  - `?tab=` values are unchanged, so existing links work: `?tab=results|conditions|xrd` now mean "Main, scrolled to that section". Main is the default and is left out of the address.
+  - The tab bar is sticky, so the section tabs stay in reach on a long page.
+  - `Collapsible` now defaults to open: Side samples, Data checks and Run totals start open on both run pages.
+  - The tab order follows the page order (Results, Conditions, XRD), not the order first proposed (Conditions, Results, XRD).
+- **Browser check (Chrome, CF_031, HPHT_309, SERUM_Buffer_021a-t3):** tabs, section scrolling, Notes and Entry Logs, and open-by-default sections behave as described on all three page types. Three things found and fixed there:
+  - the sticky bar stopped 21px below the top with content showing above it (sticky offsets start inside `<main>`'s `p-6`); now `-top-6`;
+  - a `?tab=conditions` link landed about 110px off because charts above finished loading after the scroll; the scroll now re-aligns for up to 2 s, or until the user scrolls (`useTabScroll`);
+  - switching to Notes or Entry Logs from deep in Main opened them part-way down; the new tab's content now returns to the top under the bar.
+- **Known limits, not fixed:** (1) a section near the bottom of the page cannot reach the top, so on short pages Conditions and XRD land in view but lower down, and XRD may not move at all. (2) Not from this change: on a hard reload the first API calls answer 401 before the sign-in token is ready; queries with `retry: false` never recover, so a standalone experiment shows "No conditions recorded" and a group page shows "Replicate group not found" until you navigate in-app. Main now shows Conditions by default, so this is easier to hit. Needs its own issue (touches auth timing).
+- **Files changed:** `frontend/src/components/runs/{MainSection.tsx,RunTabs.tsx,runView.ts,Collapsible.tsx}`, `frontend/src/pages/ExperimentDetail/{index.tsx,IcpSection.tsx}`, `frontend/src/pages/CoreFloods/CoreFloodRunPage.tsx`, `frontend/src/pages/Hpht/{HphtRunPage.tsx,ConditionsSummaryCard.tsx}`, five test files, `docs/user_guide/USER_MANUAL.md` (+ `project_context` copy), `docs/working/issue-log.md`
+- **Tests added:** yes, 8. Full vitest: 81 files, 836 passed; lint and type-check exit 0.
+- **Decision logged:** no

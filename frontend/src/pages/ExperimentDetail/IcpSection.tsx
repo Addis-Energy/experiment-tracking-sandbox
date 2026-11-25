@@ -34,7 +34,7 @@ export function IcpSection({ experimentId, icp }: Props) {
     `${experiments} ${experiments === 1 ? 'experiment' : 'experiments'} in series`
   return (
     <div className="p-4 border-t border-surface-border">
-      <Collapsible title="ICP over time" summary={summary} defaultOpen>
+      <Collapsible title="ICP over time" summary={summary}>
         <IcpChart rows={data.rows} markers={markers} />
       </Collapsible>
     </div>

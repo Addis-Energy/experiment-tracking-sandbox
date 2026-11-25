@@ -1,15 +1,32 @@
 import type { RunSegment } from '@/api/runs'
 import { latestSegment } from './runSegments'
 
-export const RUN_TABS = ['results', 'conditions', 'notes', 'xrd', 'logs'] as const
+/** `?tab=` values, in tab-bar order. Main shows the results, conditions and XRD
+ *  sections on one page; those three tabs open Main scrolled to their section.
+ *  Notes and Entry Logs are views of their own. */
+export const RUN_TABS = ['main', 'results', 'conditions', 'xrd', 'notes', 'logs'] as const
 export type RunTab = typeof RUN_TABS[number]
 
 export const RUN_TAB_LABEL: Record<RunTab, string> = {
+  main: 'Main',
   results: 'Results',
   conditions: 'Conditions',
-  notes: 'Notes',
   xrd: 'XRD',
+  notes: 'Notes',
   logs: 'Entry Logs',
+}
+
+/** The tabs that are sections of Main, in page order. */
+export const SECTION_TABS = ['results', 'conditions', 'xrd'] as const
+export type SectionTab = typeof SECTION_TABS[number]
+
+export function isSectionTab(tab: RunTab): tab is SectionTab {
+  return (SECTION_TABS as readonly RunTab[]).includes(tab)
+}
+
+/** True when the tab shows the Main page (Main itself or one of its sections). */
+export function showsMain(tab: RunTab): boolean {
+  return tab === 'main' || isSectionTab(tab)
 }
 
 export interface RunView {
@@ -23,7 +40,13 @@ export interface RunView {
   only: boolean
 }
 
-const DEFAULT_TAB: RunTab = 'results'
+const DEFAULT_TAB: RunTab = 'main'
+
+/** The tab named by `?tab=` (case-insensitive); Main when absent or unknown. */
+export function parseTab(raw: string | null): RunTab {
+  const t = raw?.toLowerCase()
+  return RUN_TABS.find((x) => x === t) ?? DEFAULT_TAB
+}
 
 /** The first non-variant ONGOING segment in run order, else the latest segment. */
 export function defaultSegment(segments: RunSegment[]): RunSegment | undefined {
@@ -31,11 +54,6 @@ export function defaultSegment(segments: RunSegment[]): RunSegment | undefined {
     segments.find((s) => !s.is_variant && s.status?.toUpperCase() === 'ONGOING') ??
     latestSegment(segments)
   )
-}
-
-function parseTab(raw: string | null): RunTab {
-  const t = raw?.toLowerCase()
-  return RUN_TABS.find((x) => x === t) ?? DEFAULT_TAB
 }
 
 /** The run page's view state from the URL; null when the run has no segments. */

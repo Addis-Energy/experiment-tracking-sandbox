@@ -23,7 +23,7 @@ function Item({ label, children }: { label: string; children: ReactNode }) {
 const withUnit = (v: number | null, unit: string) => (v == null ? '—' : `${fmt(v)} ${unit}`)
 
 /** Read-only setup of the run's latest non-variant segment, with its additives.
- *  Edits happen on the run page's Conditions tab, with that segment selected. */
+ *  Edits happen in the run page's Conditions section, with that segment selected. */
 export function ConditionsSummaryCard({
   conditions, conditionsHref,
 }: { conditions: HphtConditionsSummary | null; conditionsHref: string }) {
