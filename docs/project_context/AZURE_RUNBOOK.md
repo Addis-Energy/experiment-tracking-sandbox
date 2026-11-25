@@ -14,7 +14,7 @@ Conventions:
 ## 0. Setup used by every section
 
 ```bash
-cp scripts/azure/azure.env.example scripts/azure/azure.env   # untracked; fill it in
+cp scripts/azure/azure.env.example scripts/azure/azure.env   # untracked; the example has the real names, fill in only ADMIN_IP, HQ_IP, ALERT_EMAILS
 source <(tr -d '\r' < scripts/azure/azure.env)   # strip CRs (Windows editors)
 export PGHOST="$PG.postgres.database.azure.com"
 export PGSSLMODE=require
