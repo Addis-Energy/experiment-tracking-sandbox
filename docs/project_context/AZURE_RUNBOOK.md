@@ -714,8 +714,8 @@ by 2026-12-02. Rehearsal timings tell you how long the freeze will be.
    az monitor scheduled-query show -g "$APP_RG" -n labpc-backup-heartbeat \
      --query enabled
    ```
-   Expected: `true`. If tonight's backup does not send a heartbeat, the alert fires
-   within 36 hours.
+   Expected: `true`. If backups stop sending heartbeats, the alert fires within
+   48 hours of the last one (Azure's smallest window above 24 hours).
 7. **Announce** the new URL, and how to request database access (message Mat; R5).
    Nobody has a database login on day one unless they asked beforehand.
 8. **Leave the lab PC service installed but stopped and disabled** (step 2). It is

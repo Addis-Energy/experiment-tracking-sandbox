@@ -223,7 +223,7 @@ No data needs re-entering. The rehearsal runs this once.
 ### 5.10 Alerts
 
 Each alert emails Mat and the second owner.
-- **Backups:** an alert if no fresh lab PC dump has appeared in about 36 hours. `backup.ps1` only writes FAILED to a log, the same pattern that once left `update.ps1` ten days stale. *My call:* the lab PC posts a heartbeat after each successful dump, and an alert fires if it goes quiet.
+- **Backups:** an alert if no fresh lab PC dump has appeared in 48 hours (as built; Azure log alerts accept 24 h or 48 h windows, not 36 h, and 24 h would false-alarm on a late backup). `backup.ps1` only writes FAILED to a log, the same pattern that once left `update.ps1` ten days stale. *My call:* the lab PC posts a heartbeat after each successful dump, and an alert fires if it goes quiet.
 - **The app:** an availability alert on the App Service.
 - **Cost:** a monthly budget alert on the Pay-As-You-Go subscription.
 
